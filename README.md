@@ -9,19 +9,19 @@ signed URLs are never persisted.
 
 Python 3.11 or newer is required.
 
-Once a package release is published:
-
-```bash
-pip install opai-models
-```
-
-Until then, install from a checked-out repository:
+The recommended installation uses the committed `uv.lock` file so the complete
+runtime dependency graph is reproducible:
 
 ```bash
 git clone https://github.com/onprem-ai/model-downloader.git
 cd model-downloader
 uv sync --frozen
+uv run --frozen --no-sync opai-models --help
 ```
+
+Once a package release is published, `pip install opai-models` will be available
+as a convenience alternative, but it will not reproduce the complete dependency
+set from this repository's `uv.lock` file.
 
 ## Authentication
 
