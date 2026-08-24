@@ -140,6 +140,48 @@ async def test_pull_model_stages_verifies_and_atomically_publishes(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_pull_model_without_verification_uses_inventory_without_manifest(
+    tmp_path: Path,
+) -> None:
+    source_data = json.dumps(provenance().to_dict(), ensure_ascii=False, indent=2).encode() + b"\n"
+    contents = {".source.json": source_data, "file": b"payload"}
+    snap = ModelSnapshot.create(
+        "example",
+        [
+            ModelFile(path, path, len(data), "source-" + path, None)
+            for path, data in contents.items()
+        ],
+        provenance(),
+    )
+    store = SQLiteQueueStore(tmp_path / "queue.sqlite")
+    job = store.enqueue(snap.model_id, str(tmp_path / "final"), 2)
+    claimed = store.claim("worker", 60)
+    assert claimed and store.save_snapshot(job.id, claimed[1], snap)
+    client = AsyncModelClient(
+        "https://license.example",
+        lambda: "license",
+        verify_checksums=False,
+        verify_signatures=False,
+    )
+
+    def pull_file(client, model_id, path, destination, **kwargs):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents[path])
+        kwargs["mark_complete"](0, destination.stat().st_size, 123)
+        assert kwargs["expected_sha256"] is None
+        assert kwargs["verify_checksum"] is False
+        return destination
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("opai_models.async_client.pull_file_with_state", pull_file)
+        result = await client._pull_job(job.id, tmp_path / "final", store, claimed[1])
+    assert result == (tmp_path / "final").resolve()
+    assert (result / "file").read_bytes() == b"payload"
+    assert not (result / "SHA256SUMS").exists()
+    assert all(item.expected_sha256 is None for item in store.files(job.id))
+
+
+@pytest.mark.asyncio
 async def test_pull_model_rejects_checksum_and_preserves_staging(tmp_path: Path) -> None:
     contents = {"file": b"correct"}
     snap = snapshot(contents)

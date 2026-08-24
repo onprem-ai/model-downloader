@@ -5,7 +5,7 @@ import pytest
 
 from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
 from opai_models.metadata import SourceDocument, render_sha256sums
-from opai_models.snapshot import ModelFile, ModelSnapshot, snapshot_model
+from opai_models.snapshot import ModelFile, ModelSnapshot, _sha256, snapshot_model
 
 
 def access(path: str, size: int, digest: str | None = None) -> ModelAccess:
@@ -66,6 +66,17 @@ def listing() -> list[dict[str, object]]:
             "prefixes": [],
         },
     ]
+
+
+def test_snapshot_checksum_normalization_and_empty_inventory() -> None:
+    digest = "a" * 64
+    assert _sha256(digest.upper()) == digest
+    assert _sha256(__import__("base64").b64encode(bytes.fromhex(digest)).decode()) == digest
+    assert _sha256(None) is None
+    assert _sha256("not-a-checksum") is None
+    assert _sha256(__import__("base64").b64encode(b"short").decode()) is None
+    with pytest.raises(ModelDownloadError, match="empty"):
+        ModelSnapshot.create("example", [])
 
 
 def test_snapshot_recurses_and_uses_authoritative_metadata() -> None:
@@ -167,8 +178,7 @@ def test_checksum_verification_can_be_skipped_independently() -> None:
         ],
         "prefixes": [],
     }
-    sums = render_sha256sums({".source.json": "0" * 64, "file": "1" * 64})
-    client.read_small.side_effect = [sums, source_bytes()]
+    client.read_small.return_value = source_bytes()
     client.access.side_effect = lambda model, path: access(
         path, len(source_bytes()) if path.endswith(".source.json") else 1, "f" * 64
     )
@@ -179,6 +189,34 @@ def test_checksum_verification_can_be_skipped_independently() -> None:
         verify_signatures=False,
     )
     assert result.file_count == 2
+    assert all(item.sha256 is None for item in result.files)
+    assert result.sha256sums is None
+
+
+def test_snapshot_without_verification_uses_authenticated_listing() -> None:
+    client = MagicMock(spec=LicenseClient)
+    source = source_bytes()
+    client.list_all.return_value = {
+        "objects": [
+            {"key": ".source.json", "size": len(source)},
+            {"key": "file", "size": 4},
+        ],
+        "prefixes": [],
+    }
+    client.read_small.return_value = source
+    client.access.side_effect = lambda model, path: access(
+        path, len(source) if path == ".source.json" else 4
+    )
+    result = snapshot_model(
+        client,
+        "example",
+        verify_checksums=False,
+        verify_signatures=False,
+    )
+    assert [item.relative_path for item in result.files] == [".source.json", "file"]
+    assert all(item.sha256 is None for item in result.files)
+    assert result.sha256sums is None
+    client.read_small.assert_called_once_with("example", ".source.json")
 
 
 def test_snapshot_requires_metadata_and_exact_inventory() -> None:

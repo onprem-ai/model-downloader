@@ -164,7 +164,7 @@ def pull_file_with_state(
     *,
     expected_source_id: str,
     expected_size: int,
-    expected_sha256: str,
+    expected_sha256: str | None,
     completed_chunks: set[int],
     mark_complete: Callable[[int, int, int], None],
     chunk_size: int = 64 * 1024 * 1024,
@@ -179,9 +179,9 @@ def pull_file_with_state(
     access = provider.get()
     if access.source_id != expected_source_id or access.size != expected_size:
         raise ModelDownloadError("source model changed while downloading")
-    supplied = _expected_sha256({"sha256": expected_sha256})
+    supplied = _expected_sha256({"sha256": expected_sha256 or ""})
     current = _expected_sha256(access.checksums)
-    if supplied is None:
+    if verify_checksum and supplied is None:
         raise ModelDownloadError("invalid expected model checksum")
     if verify_checksum and current is not None and current != supplied:
         raise ModelDownloadError("source model checksum changed while downloading")
@@ -220,6 +220,8 @@ def pull_file_with_state(
     if partial.stat().st_size != expected_size:
         raise ModelDownloadError("final size verification failed")
     if verify_checksum:
+        if supplied is None:
+            raise ModelDownloadError("invalid expected model checksum")
         digest = hashlib.sha256()
         with partial.open("rb") as stream:
             for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):

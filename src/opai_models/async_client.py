@@ -29,8 +29,8 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _matches(path: Path, expected: str) -> bool:
-    return path.is_file() and _file_sha256(path) == expected
+def _matches(path: Path, expected: str | None) -> bool:
+    return expected is not None and path.is_file() and _file_sha256(path) == expected
 
 
 def _completed_directory_matches(
@@ -45,15 +45,20 @@ def _completed_directory_matches(
     sigstore_offline: bool,
 ) -> bool:
     try:
-        sums = (destination / "SHA256SUMS").read_bytes()
-        if "sha256:" + hashlib.sha256(sums).hexdigest() != job.snapshot_sha256:
-            return False
-        parsed = parse_sha256sums(sums)
-        if parsed != {item.relative_path: item.expected_sha256 for item in files}:
-            return False
         if read_source(destination / ".source.json") != source:
             return False
-        expected_paths = set(parsed) | {"SHA256SUMS"}
+        expected_paths = {item.relative_path for item in files}
+        sums_path = destination / "SHA256SUMS"
+        if verify_checksums or verify_signatures or sums_path.is_file():
+            sums = sums_path.read_bytes()
+            if "sha256:" + hashlib.sha256(sums).hexdigest() != job.snapshot_sha256:
+                return False
+            parsed = parse_sha256sums(sums)
+            if parsed != {item.relative_path: item.expected_sha256 for item in files}:
+                return False
+            expected_paths.add("SHA256SUMS")
+        else:
+            sums = b""
         signature_path = destination / "SHA256SUMS.sigstore.json"
         if verify_signatures:
             if trusted_identity is None or not signature_path.is_file():
@@ -72,7 +77,9 @@ def _completed_directory_matches(
         }
         return actual_paths == expected_paths and (
             not verify_checksums
-            or all(_matches(destination / path, digest) for path, digest in parsed.items())
+            or all(
+                _matches(destination / item.relative_path, item.expected_sha256) for item in files
+            )
         )
     except (OSError, ModelDownloadError):
         return False
@@ -298,11 +305,17 @@ class AsyncModelClient:
             await transfer(item)
         if not await asyncio.to_thread(store.mark_verifying, job_id, claim_token):
             raise DownloadCancelled("download lease was lost")
-        sums = "".join(f"{item.expected_sha256}  {item.relative_path}\n" for item in files)
-        if "sha256:" + hashlib.sha256(sums.encode()).hexdigest() != job.snapshot_sha256:
-            raise ModelDownloadError("persisted model snapshot is inconsistent")
-        await asyncio.to_thread(_write_bytes, staging / "SHA256SUMS", sums.encode())
+        sums: str | None = None
+        if self.verify_checksums or self.verify_signatures:
+            if any(item.expected_sha256 is None for item in files):
+                raise ModelDownloadError("persisted model snapshot lacks checksums")
+            sums = "".join(f"{item.expected_sha256}  {item.relative_path}\n" for item in files)
+            if "sha256:" + hashlib.sha256(sums.encode()).hexdigest() != job.snapshot_sha256:
+                raise ModelDownloadError("persisted model snapshot is inconsistent")
+            await asyncio.to_thread(_write_bytes, staging / "SHA256SUMS", sums.encode())
         if self.verify_signatures:
+            if sums is None:
+                raise ModelDownloadError("signature verification requires SHA256SUMS")
             signature = await asyncio.to_thread(
                 self._client().read_small,
                 job.model_id,

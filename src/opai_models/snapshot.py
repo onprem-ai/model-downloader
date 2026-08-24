@@ -24,7 +24,7 @@ class ModelFile:
     relative_path: str
     size: int
     source_id: str
-    sha256: str
+    sha256: str | None
     etag: str | None = None
     version_id: str | None = None
 
@@ -35,7 +35,7 @@ class ModelSnapshot:
     files: tuple[ModelFile, ...]
     file_count: int
     total_bytes: int
-    sha256sums: str
+    sha256sums: str | None
     snapshot_sha256: str
     source: SourceDocument | None = None
 
@@ -49,14 +49,26 @@ class ModelSnapshot:
         ordered = tuple(sorted(files, key=lambda item: item.relative_path))
         if not ordered:
             raise ModelDownloadError("model directory is empty")
-        encoded = render_sha256sums({item.relative_path: item.sha256 for item in ordered})
+        checksums = {item.relative_path: item.sha256 for item in ordered}
+        if all(digest is not None for digest in checksums.values()):
+            encoded = render_sha256sums(
+                {path: digest for path, digest in checksums.items() if digest is not None}
+            )
+            sha256sums = encoded.decode()
+        else:
+            encoded = "\n".join(
+                f"{item.relative_path}\0{item.size}\0{item.source_id}" for item in ordered
+            ).encode()
+            sha256sums = None
         return cls(
             model_id,
             ordered,
             len(ordered),
             sum(item.size for item in ordered),
-            encoded.decode(),
-            snapshot_digest(encoded),
+            sha256sums,
+            snapshot_digest(encoded)
+            if sha256sums is not None
+            else "sha256:" + hashlib.sha256(encoded).hexdigest(),
             source,
         )
 
@@ -126,12 +138,20 @@ def snapshot_model(
                     raise ModelDownloadError("model listing contains a duplicate object")
                 listed[relative] = listed_size
 
-    if "SHA256SUMS" not in metadata or ".source.json" not in listed:
-        raise ModelDownloadError("model requires SHA256SUMS and .source.json")
-    checksum_bytes = client.read_small(model, "SHA256SUMS")
-    checksums = parse_sha256sums(checksum_bytes)
-    if set(checksums) != set(listed):
-        raise ModelDownloadError("SHA256SUMS inventory does not match model objects")
+    if (verify_checksums or verify_signatures) and "SHA256SUMS" not in metadata:
+        raise ModelDownloadError("model requires SHA256SUMS")
+    if ".source.json" not in listed:
+        raise ModelDownloadError("model requires .source.json")
+    checksum_bytes: bytes | None = None
+    checksums: dict[str, str | None]
+    if verify_checksums or verify_signatures:
+        checksum_bytes = client.read_small(model, "SHA256SUMS")
+        parsed_checksums = parse_sha256sums(checksum_bytes)
+        if set(parsed_checksums) != set(listed):
+            raise ModelDownloadError("SHA256SUMS inventory does not match model objects")
+        checksums = dict(parsed_checksums)
+    else:
+        checksums = dict.fromkeys(listed)
     source_bytes = client.read_small(model, ".source.json")
     source = parse_source(source_bytes)
     if verify_checksums and hashlib.sha256(source_bytes).hexdigest() != checksums[".source.json"]:
@@ -142,6 +162,8 @@ def snapshot_model(
         if "SHA256SUMS.sigstore.json" not in metadata:
             raise ModelDownloadError("model signature is required")
         bundle = client.read_small(model, "SHA256SUMS.sigstore.json", maximum=16 * 1024 * 1024)
+        if checksum_bytes is None:
+            raise ModelDownloadError("model signature requires SHA256SUMS")
         verify_sigstore_bundle(
             checksum_bytes,
             bundle,

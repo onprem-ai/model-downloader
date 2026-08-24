@@ -88,7 +88,7 @@ class DownloadFile:
     expected_size: int
     completed_bytes: int
     source_id: str
-    expected_sha256: str
+    expected_sha256: str | None
     etag: str | None
     version_id: str | None
     computed_sha256: str | None
@@ -188,7 +188,7 @@ class SQLiteQueueStore:
                   state TEXT NOT NULL CHECK(state IN ('queued','downloading','verifying','completed','failed')),
                   expected_size INTEGER NOT NULL CHECK(expected_size >= 0),
                   completed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(completed_bytes >= 0),
-                  source_id TEXT NOT NULL, expected_sha256 TEXT NOT NULL, etag TEXT, version_id TEXT,
+                  source_id TEXT NOT NULL, expected_sha256 TEXT, etag TEXT, version_id TEXT,
                   computed_sha256 TEXT, error_code TEXT, error_message TEXT,
                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT,
                   UNIQUE(job_id, relative_path)
