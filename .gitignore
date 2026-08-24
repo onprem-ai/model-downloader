@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.coverage
+coverage.json
+htmlcov/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.partial
+*.partial.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

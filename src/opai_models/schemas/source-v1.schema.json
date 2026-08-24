@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.onprem.ai/models/source-v1.schema.json",
+  "title": "OnPrem AI model source provenance",
+  "description": "Durable, non-operational provenance for one model directory. This document contains no download URLs, credentials, checksums, or transfer state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Version of the .source.json document format."
+    },
+    "source": {
+      "$ref": "#/$defs/huggingFaceSource"
+    },
+    "acquisition": {
+      "$ref": "#/$defs/acquisition"
+    },
+    "upstream_metadata": {
+      "$ref": "#/$defs/upstreamMetadata"
+    }
+  },
+  "$defs": {
+    "huggingFaceSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "repository",
+        "revision"
+      ],
+      "properties": {
+        "provider": {
+          "const": "huggingface"
+        },
+        "repository": {
+          "type": "string",
+          "description": "Hugging Face repository ID in namespace/name form.",
+          "pattern": "^[^/\\s\\x00-\\x1f\\x7f]+/[^/\\s\\x00-\\x1f\\x7f]+$",
+          "maxLength": 256
+        },
+        "revision": {
+          "description": "Immutable lowercase Git commit SHA. Null is allowed only when the exact historical revision cannot be established.",
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subdirectory": {
+          "description": "Optional source subdirectory copied into this model directory.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/relativePath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acquired_at"
+      ],
+      "properties": {
+        "acquired_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$",
+          "description": "UTC time at which this source snapshot was acquired."
+        },
+        "tool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      }
+    },
+    "upstreamMetadata": {
+      "type": "object",
+      "description": "Optional normalized snapshot of selected Hugging Face model-card metadata. It is informational and not an authorization or compatibility decision.",
+      "additionalProperties": false,
+      "properties": {
+        "licenses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "uniqueItems": true
+        },
+        "library_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "pipeline_tag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "uniqueItems": true
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\\\x00-\\x1f\\x7f])[^/]+(?:/[^/]+)*$"
+    }
+  }
+}

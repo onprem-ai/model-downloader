@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opai-models"
+version = "0.1.0"
+description = "Resumable model downloader for OnPrem AI model storage"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "OnPrem AI" }]
+keywords = ["onprem-ai", "models", "downloader", "resume", "sigstore"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "sigstore==4.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/onprem-ai/model-downloader"
+Documentation = "https://github.com/onprem-ai/model-downloader#readme"
+Repository = "https://github.com/onprem-ai/model-downloader"
+Issues = "https://github.com/onprem-ai/model-downloader/issues"
+
+[project.scripts]
+opai-models = "opai_models.cli:main"
+
+[dependency-groups]
+dev = [
+  "build==1.3.0",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-cov==7.1.0",
+  "ruff==0.13.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/opai_models"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["opai_models"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+"tests/integration/**" = ["S101", "S603"]
+"src/opai_models/manager.py" = ["E501", "S608"]
