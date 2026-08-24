@@ -5,7 +5,7 @@ import hashlib
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
 from opai_models.download import (
@@ -17,6 +17,9 @@ from opai_models.download import (
 from opai_models.metadata import SourceDocument, parse_sha256sums, parse_source, read_source
 from opai_models.signatures import SigstoreIdentity, verify_sigstore_bundle
 from opai_models.snapshot import ModelSnapshot, snapshot_model
+
+if TYPE_CHECKING:
+    from opai_models.sync import SyncResult
 
 LicenseProvider = Callable[[], str]
 
@@ -166,6 +169,37 @@ class AsyncModelClient:
         model = LicenseClient._model_id(model_id)
         data = await asyncio.to_thread(self._client().read_small, model, ".source.json")
         return parse_source(data)
+
+    async def sync_model(
+        self,
+        model_id: str,
+        destination: Path,
+        *,
+        rehash: bool = False,
+        delete: bool = False,
+        chunk_size: int = 64 * 1024 * 1024,
+        workers: int = 4,
+        request_retries: int = 8,
+        initial_backoff: float = 0.5,
+        max_backoff: float = 60.0,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> "SyncResult":
+        """Synchronize an existing model directory from its durable manifest."""
+        from opai_models.sync import sync_model
+
+        return await sync_model(
+            self,
+            model_id,
+            destination,
+            rehash=rehash,
+            delete=delete,
+            chunk_size=chunk_size,
+            workers=workers,
+            request_retries=request_retries,
+            initial_backoff=initial_backoff,
+            max_backoff=max_backoff,
+            progress=progress,
+        )
 
     async def _pull_job(
         self,

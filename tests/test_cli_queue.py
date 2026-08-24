@@ -149,6 +149,44 @@ def test_cli_pull_can_explicitly_skip_signature_verification(monkeypatch, tmp_pa
     assert kwargs["verify_signatures"] is False
 
 
+def test_cli_sync_forwards_policy(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setenv("OPAI_LICENSE_KEY", "secret")
+    result = MagicMock(
+        model_id="example",
+        destination=tmp_path / "example",
+        files=2,
+        bytes=10,
+        reused_files=1,
+        downloaded_files=1,
+        deleted_files=0,
+        rehashed_files=1,
+    )
+    client = MagicMock()
+    client.sync_model = AsyncMock(return_value=result)
+    with patch("opai_models.cli.AsyncModelClient", return_value=client) as client_type:
+        assert (
+            main(
+                [
+                    "sync",
+                    "example",
+                    str(tmp_path / "example"),
+                    "--rehash",
+                    "--delete",
+                    "--request-retries",
+                    "12",
+                    "--skip-signature-verification",
+                ]
+            )
+            == 0
+        )
+    assert client_type.call_args.kwargs["verify_checksums"] is True
+    assert client_type.call_args.kwargs["verify_signatures"] is False
+    assert client.sync_model.call_args.kwargs["rehash"] is True
+    assert client.sync_model.call_args.kwargs["delete"] is True
+    assert client.sync_model.call_args.kwargs["request_retries"] == 12
+    assert "1 reused, 1 downloaded" in capsys.readouterr().err
+
+
 def test_cli_pull_failure_is_sanitized(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setenv("OPAI_LICENSE_KEY", "secret")
     failed = job("failed")

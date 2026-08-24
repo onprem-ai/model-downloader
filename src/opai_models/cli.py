@@ -117,7 +117,74 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow an unsigned or unverified SHA256SUMS manifest",
     )
+
+    sync_parser = subparsers.add_parser(
+        "sync", help="synchronize an existing model directory from SHA256SUMS"
+    )
+    sync_parser.add_argument("model_id")
+    sync_parser.add_argument("destination", type=Path)
+    sync_parser.add_argument("--rehash", action="store_true")
+    sync_parser.add_argument("--delete", action="store_true")
+    sync_parser.add_argument("--chunk-size", type=int, default=64 * 1024 * 1024)
+    sync_parser.add_argument("--workers", type=int, default=4)
+    sync_parser.add_argument("--request-retries", type=int, default=8)
+    sync_parser.add_argument("--initial-backoff", type=float, default=0.5)
+    sync_parser.add_argument("--max-backoff", type=float, default=60.0)
+    sync_parser.add_argument(
+        "--sigstore-identity",
+        default=os.environ.get(DEFAULT_SIGSTORE_IDENTITY_ENV),
+    )
+    sync_parser.add_argument(
+        "--sigstore-issuer",
+        default=os.environ.get(DEFAULT_SIGSTORE_ISSUER_ENV),
+    )
+    sync_parser.add_argument("--sigstore-offline", action="store_true")
+    sync_parser.add_argument("--skip-signature-verification", action="store_true")
     return parser
+
+
+async def _sync(args: argparse.Namespace, license_provider) -> int:
+    client = AsyncModelClient(
+        args.api_url,
+        license_provider,
+        verify_checksums=True,
+        verify_signatures=not args.skip_signature_verification,
+        sigstore_identity=args.sigstore_identity,
+        sigstore_issuer=args.sigstore_issuer,
+        sigstore_offline=args.sigstore_offline,
+    )
+    result = await client.sync_model(
+        args.model_id,
+        args.destination,
+        rehash=args.rehash,
+        delete=args.delete,
+        chunk_size=args.chunk_size,
+        workers=args.workers,
+        request_retries=args.request_retries,
+        initial_backoff=args.initial_backoff,
+        max_backoff=args.max_backoff,
+        progress=_progress if not args.json else None,
+    )
+    output = {
+        "event": "complete",
+        "model_id": result.model_id,
+        "destination": str(result.destination),
+        "files": result.files,
+        "bytes": result.bytes,
+        "reused_files": result.reused_files,
+        "downloaded_files": result.downloaded_files,
+        "deleted_files": result.deleted_files,
+        "rehashed_files": result.rehashed_files,
+    }
+    if args.json:
+        print(json.dumps(output, separators=(",", ":")))
+    else:
+        print(
+            f"Synchronized {result.files} files ({_human_size(result.bytes)}): "
+            f"{result.reused_files} reused, {result.downloaded_files} downloaded",
+            file=sys.stderr,
+        )
+    return 0
 
 
 async def _pull(args: argparse.Namespace, license_provider) -> int:
@@ -195,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
         key = _license_key(args.license_env, prompt=not args.no_prompt)
         if args.command == "pull":
             return asyncio.run(_pull(args, lambda: key))
+        if args.command == "sync":
+            return asyncio.run(_sync(args, lambda: key))
         client = LicenseClient(args.api_url, key)
         if args.command == "list":
             result = client.list_models(limit=args.limit)

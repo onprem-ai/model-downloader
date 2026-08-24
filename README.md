@@ -72,6 +72,20 @@ opai-models pull example example \
   --overall-timeout 0
 ```
 
+Synchronize an existing completed directory without relying on SQLite state:
+
+```bash
+opai-models sync example /srv/models/example
+```
+
+If the local and remote `SHA256SUMS` files are identical, existing files with
+matching sizes are reused without rehashing. If manifests differ, only files
+with matching manifest entries are reused directly; other existing files are
+hashed and downloaded only when missing or invalid. Use `--rehash` to hash every
+local model file, and `--delete` to omit files that are no longer in the remote
+manifest. Synchronization builds a hidden sibling replacement directory and
+uses a rollback-safe replacement only after all required files are ready.
+
 The argument is the model ID, not an S3 path. The downloader never needs a
 bucket name, S3 endpoint, storage prefix, or permanent S3 credential. The
 License Server maps the model ID to storage and returns short-lived download

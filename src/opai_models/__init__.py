@@ -14,6 +14,7 @@ from opai_models.manager import (
 from opai_models.metadata import SourceDocument
 from opai_models.signatures import SigstoreIdentity, verify_sigstore_bundle
 from opai_models.snapshot import ModelFile, ModelSnapshot
+from opai_models.sync import SyncResult
 
 __version__ = "0.1.0"
 __all__ = [
@@ -32,5 +33,6 @@ __all__ = [
     "ModelSnapshot",
     "SigstoreIdentity",
     "SourceDocument",
+    "SyncResult",
     "verify_sigstore_bundle",
 ]
