@@ -12,6 +12,10 @@ class ModelDownloadError(RuntimeError):
     """Safe operator-facing model transfer error."""
 
 
+class TransientModelDownloadError(ModelDownloadError):
+    """A temporary network or service failure suitable for automatic retry."""
+
+
 @dataclass(frozen=True)
 class ModelAccess:
     path: str
@@ -97,13 +101,20 @@ class LicenseClient:
                 body = json.load(response)
         except urllib.error.HTTPError as exc:
             try:
-                raise ModelDownloadError(f"License Server returned HTTP {exc.code}") from None
+                error_type = (
+                    TransientModelDownloadError
+                    if exc.code in {408, 429, 500, 502, 503, 504}
+                    else ModelDownloadError
+                )
+                raise error_type(f"License Server returned HTTP {exc.code}") from None
             finally:
                 exc.close()
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise ModelDownloadError(
-                f"Cannot read a valid response from the License Server ({exc.__class__.__name__})"
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+            raise TransientModelDownloadError(
+                f"Cannot reach the License Server ({exc.__class__.__name__})"
             ) from None
+        except json.JSONDecodeError:
+            raise ModelDownloadError("License Server returned invalid JSON") from None
         if not isinstance(body, dict):
             raise ModelDownloadError("License Server returned an invalid response")
         return body
@@ -128,7 +139,7 @@ class LicenseClient:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
                 body = response.read(maximum + 1)
         except (OSError, urllib.error.URLError, TimeoutError):
-            raise ModelDownloadError("cannot read model metadata") from None
+            raise TransientModelDownloadError("cannot read model metadata") from None
         if len(body) != access.size or len(body) > maximum:
             raise ModelDownloadError("invalid model metadata size")
         return body

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from opai_models.client import LicenseClient, ModelDownloadError
+from opai_models.client import LicenseClient, ModelDownloadError, TransientModelDownloadError
 
 
 class Response(io.BytesIO):
@@ -173,6 +173,17 @@ def test_access_rejects_wrong_path_negative_size_and_bad_maps() -> None:
     ):
         with patch.object(client, "_json", return_value={**base, **change}):
             with pytest.raises(ModelDownloadError, match="invalid model metadata"):
+                client.access("example", "a")
+
+
+def test_transient_license_server_failures_are_classified() -> None:
+    client = LicenseClient("https://license.example", "license-secret")
+    for failure in (
+        urllib.error.HTTPError("https://license.example", 503, "busy", {}, None),
+        urllib.error.URLError("offline"),
+    ):
+        with patch("urllib.request.urlopen", side_effect=failure):
+            with pytest.raises(TransientModelDownloadError):
                 client.access("example", "a")
 
 

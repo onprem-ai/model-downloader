@@ -7,27 +7,29 @@ from opai_models.manager import DownloadJob
 
 def job(state: str = "completed") -> DownloadJob:
     return DownloadJob(
-        "id",
-        "example",
-        "/downloads/example",
-        state,
-        10,
-        10,
-        2,
-        2,
-        None,
-        1,
-        3,
-        "sha256:" + "a" * 64,
-        None,
-        None,
-        "now",
-        "now",
-        "now",
-        "now" if state == "completed" else None,
-        None,
-        None,
-        None,
+        id="id",
+        model_id="example",
+        destination="/downloads/example",
+        state=state,
+        completed_bytes=10,
+        total_bytes=10,
+        completed_files=2,
+        total_files=2,
+        bytes_per_second=None,
+        run_count=1,
+        consecutive_failures=0,
+        next_retry_at=None,
+        last_progress_at="now",
+        snapshot_sha256="sha256:" + "a" * 64,
+        error_code=None,
+        error_message=None,
+        created_at="now",
+        updated_at="now",
+        started_at="now",
+        completed_at="now" if state == "completed" else None,
+        worker_id=None,
+        lease_expires_at=None,
+        heartbeat_at=None,
     )
 
 
@@ -69,7 +71,7 @@ def test_cli_pull_forwards_verification_policy(monkeypatch, tmp_path: Path) -> N
     manager.wait = AsyncMock(return_value=job())
     with (
         patch("opai_models.cli.AsyncModelClient") as client_type,
-        patch("opai_models.cli.DownloadManager", return_value=manager),
+        patch("opai_models.cli.DownloadManager", return_value=manager) as manager_type,
     ):
         assert (
             main(
@@ -86,6 +88,18 @@ def test_cli_pull_forwards_verification_policy(monkeypatch, tmp_path: Path) -> N
                     "https://issuer.example",
                     "--sigstore-offline",
                     "--skip-checksum-verification",
+                    "--request-retries",
+                    "12",
+                    "--integrity-retries",
+                    "4",
+                    "--initial-backoff",
+                    "1.5",
+                    "--max-backoff",
+                    "90",
+                    "--no-progress-timeout",
+                    "7200",
+                    "--overall-timeout",
+                    "14400",
                 ]
             )
             == 0
@@ -96,6 +110,13 @@ def test_cli_pull_forwards_verification_policy(monkeypatch, tmp_path: Path) -> N
     assert kwargs["sigstore_identity"] == "trusted@example.com"
     assert kwargs["sigstore_issuer"] == "https://issuer.example"
     assert kwargs["sigstore_offline"] is True
+    manager_kwargs = manager_type.call_args.kwargs
+    assert manager_kwargs["request_retries"] == 12
+    assert manager_kwargs["integrity_retries"] == 4
+    assert manager_kwargs["initial_backoff"] == 1.5
+    assert manager_kwargs["max_backoff"] == 90
+    assert manager_kwargs["no_progress_timeout"] == 7200
+    assert manager_kwargs["overall_timeout"] == 14400
 
 
 def test_cli_pull_can_explicitly_skip_signature_verification(monkeypatch, tmp_path: Path) -> None:

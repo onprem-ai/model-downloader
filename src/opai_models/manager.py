@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import secrets
 import sqlite3
 import threading
 import uuid
@@ -15,8 +17,12 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from opai_models.async_client import AsyncModelClient
-from opai_models.client import LicenseClient, ModelDownloadError
-from opai_models.download import DownloadCancelled
+from opai_models.client import LicenseClient, ModelDownloadError, TransientModelDownloadError
+from opai_models.download import (
+    ChecksumMismatchError,
+    DownloadCancelled,
+    RetryableDownloadError,
+)
 from opai_models.metadata import SourceDocument
 from opai_models.snapshot import ModelSnapshot
 
@@ -24,6 +30,7 @@ JobState = Literal[
     "queued",
     "snapshotting",
     "downloading",
+    "retry_wait",
     "verifying",
     "completed",
     "failed",
@@ -32,14 +39,15 @@ JobState = Literal[
 ]
 FileState = Literal["queued", "downloading", "verifying", "completed", "failed"]
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
-_RUNNING = frozenset({"snapshotting", "downloading", "verifying"})
+_RUNNING = frozenset({"snapshotting", "downloading", "retry_wait", "verifying"})
 _JOB_COLUMNS = """id, model_id, destination, state, completed_bytes, total_bytes,
-completed_files, total_files, bytes_per_second, attempt, max_attempts,
-snapshot_sha256, error_code, error_message, created_at, updated_at, started_at,
-completed_at, worker_id, lease_expires_at, heartbeat_at"""
+completed_files, total_files, bytes_per_second, run_count, consecutive_failures,
+next_retry_at, last_progress_at, snapshot_sha256, error_code, error_message,
+created_at, updated_at, started_at, completed_at, worker_id, lease_expires_at,
+heartbeat_at"""
 _FILE_COLUMNS = """id, job_id, object_path, relative_path, state, expected_size,
 completed_bytes, source_id, expected_sha256, etag, version_id, computed_sha256,
-error_code, error_message, created_at, updated_at, completed_at"""
+integrity_failures, error_code, error_message, created_at, updated_at, completed_at"""
 
 
 class JobNotFoundError(KeyError):
@@ -61,8 +69,10 @@ class DownloadJob:
     completed_files: int
     total_files: int | None
     bytes_per_second: int | None
-    attempt: int
-    max_attempts: int
+    run_count: int
+    consecutive_failures: int
+    next_retry_at: str | None
+    last_progress_at: str
     snapshot_sha256: str | None
     error_code: str | None
     error_message: str | None
@@ -92,6 +102,7 @@ class DownloadFile:
     etag: str | None
     version_id: str | None
     computed_sha256: str | None
+    integrity_failures: int
     error_code: str | None
     error_message: str | None
     created_at: str
@@ -99,8 +110,23 @@ class DownloadFile:
     completed_at: str | None
 
 
+@dataclass(frozen=True)
+class DownloadError:
+    id: int
+    job_id: str
+    file_id: str | None
+    chunk_index: int | None
+    occurred_at: str
+    error_type: str
+    message: str
+    retryable: bool
+    http_status: int | None
+    request_attempt: int | None
+    backoff_seconds: float | None
+
+
 class QueueStore(Protocol):
-    def enqueue(self, model_id: str, destination: str, max_attempts: int) -> DownloadJob: ...
+    def enqueue(self, model_id: str, destination: str) -> DownloadJob: ...
     def get(self, job_id: str) -> DownloadJob: ...
     def list(self, *, limit: int = 100, state: JobState | None = None) -> list[DownloadJob]: ...
     def claim(self, worker_id: str, lease_seconds: int) -> tuple[DownloadJob, str] | None: ...
@@ -111,7 +137,15 @@ class QueueStore(Protocol):
     def prepare_chunks(self, file_id: str, token: str, size: int, chunk_size: int) -> bool: ...
     def completed_chunks(self, file_id: str) -> set[int]: ...
     def record_progress(self, file_id: str, token: str, event: dict[str, Any]) -> bool: ...
-    def reset_file(self, file_id: str, token: str) -> bool: ...
+    def record_error(self, file_id: str, token: str, event: dict[str, Any]) -> bool: ...
+    def record_job_error(self, job_id: str, token: str, event: dict[str, Any]) -> bool: ...
+    def errors(self, job_id: str) -> list[DownloadError]: ...
+    def schedule_retry(
+        self, job_id: str, token: str, *, delay: float, error_code: str, error_message: str
+    ) -> bool: ...
+    def release(self, job_id: str, token: str) -> bool: ...
+    def reset_file(self, file_id: str, token: str, *, integrity_failure: bool = False) -> bool: ...
+    def file(self, file_id: str) -> DownloadFile: ...
     def update_file(
         self,
         file_id: str,
@@ -138,8 +172,87 @@ def _timestamp(value: datetime | None = None) -> str:
     return (value or _now()).isoformat()
 
 
+def _safe_error(value: object, maximum: int = 500) -> str:
+    message = str(value or "download failure")
+    message = re.sub(r"https?://\S+", "[URL REDACTED]", message, flags=re.IGNORECASE)
+    message = re.sub(r"Bearer\s+\S+", "Bearer [REDACTED]", message, flags=re.IGNORECASE)
+    message = re.sub(r"ONPRM(?:-[0-9A-Z]{5}){5}", "[LICENSE REDACTED]", message)
+    return message[:maximum]
+
+
 class SQLiteQueueStore:
     """Single-host SQLite WAL queue with expiring leases and fencing tokens."""
+
+    _EXPECTED_COLUMNS = {
+        "download_jobs": {
+            "id",
+            "model_id",
+            "destination",
+            "state",
+            "completed_bytes",
+            "total_bytes",
+            "completed_files",
+            "total_files",
+            "bytes_per_second",
+            "run_count",
+            "consecutive_failures",
+            "next_retry_at",
+            "last_progress_at",
+            "snapshot_sha256",
+            "source_json",
+            "error_code",
+            "error_message",
+            "created_at",
+            "updated_at",
+            "started_at",
+            "completed_at",
+            "worker_id",
+            "claim_token",
+            "lease_expires_at",
+            "heartbeat_at",
+        },
+        "download_files": {
+            "id",
+            "job_id",
+            "object_path",
+            "relative_path",
+            "state",
+            "expected_size",
+            "completed_bytes",
+            "source_id",
+            "expected_sha256",
+            "etag",
+            "version_id",
+            "computed_sha256",
+            "integrity_failures",
+            "error_code",
+            "error_message",
+            "created_at",
+            "updated_at",
+            "completed_at",
+        },
+        "download_chunks": {
+            "file_id",
+            "chunk_index",
+            "start_byte",
+            "end_byte",
+            "completed",
+            "completed_at",
+        },
+        "download_errors": {
+            "id",
+            "job_id",
+            "file_id",
+            "chunk_index",
+            "occurred_at",
+            "error_type",
+            "message",
+            "retryable",
+            "http_status",
+            "request_attempt",
+            "backoff_seconds",
+        },
+    }
 
     def __init__(self, database_path: Path, *, busy_timeout_ms: int = 5000) -> None:
         self.database_path = Path(database_path).expanduser().resolve()
@@ -165,19 +278,39 @@ class SQLiteQueueStore:
             if str(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower() != "wal":
                 raise RuntimeError("SQLite WAL mode is required")
             connection.execute("PRAGMA synchronous=FULL")
+            existing = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+            if existing:
+                if existing != set(self._EXPECTED_COLUMNS):
+                    raise RuntimeError("incompatible downloader database; delete it and restart")
+                actual = {
+                    table: {
+                        str(row[1])
+                        for row in connection.execute(f"PRAGMA table_info({table})")  # noqa: S608
+                    }
+                    for table in self._EXPECTED_COLUMNS
+                }
+                if actual != self._EXPECTED_COLUMNS:
+                    raise RuntimeError("incompatible downloader database; delete it and restart")
+                return
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS download_jobs (
                   id TEXT PRIMARY KEY, model_id TEXT NOT NULL, destination TEXT NOT NULL,
                   state TEXT NOT NULL CHECK(state IN ('queued','snapshotting','downloading',
-                    'verifying','completed','failed','cancel_requested','cancelled')),
+                    'retry_wait','verifying','completed','failed','cancel_requested','cancelled')),
                   completed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(completed_bytes >= 0),
                   total_bytes INTEGER CHECK(total_bytes IS NULL OR total_bytes >= 0),
                   completed_files INTEGER NOT NULL DEFAULT 0 CHECK(completed_files >= 0),
                   total_files INTEGER CHECK(total_files IS NULL OR total_files >= 0),
                   bytes_per_second INTEGER CHECK(bytes_per_second IS NULL OR bytes_per_second >= 0),
-                  attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
-                  max_attempts INTEGER NOT NULL CHECK(max_attempts > 0), snapshot_sha256 TEXT,
+                  run_count INTEGER NOT NULL DEFAULT 0 CHECK(run_count >= 0),
+                  consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures >= 0),
+                  next_retry_at TEXT, last_progress_at TEXT NOT NULL, snapshot_sha256 TEXT,
                   source_json TEXT, error_code TEXT, error_message TEXT, created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
                   worker_id TEXT, claim_token TEXT, lease_expires_at TEXT, heartbeat_at TEXT
@@ -189,7 +322,9 @@ class SQLiteQueueStore:
                   expected_size INTEGER NOT NULL CHECK(expected_size >= 0),
                   completed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(completed_bytes >= 0),
                   source_id TEXT NOT NULL, expected_sha256 TEXT, etag TEXT, version_id TEXT,
-                  computed_sha256 TEXT, error_code TEXT, error_message TEXT,
+                  computed_sha256 TEXT,
+                  integrity_failures INTEGER NOT NULL DEFAULT 0 CHECK(integrity_failures >= 0),
+                  error_code TEXT, error_message TEXT,
                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT,
                   UNIQUE(job_id, relative_path)
                 );
@@ -200,10 +335,26 @@ class SQLiteQueueStore:
                   completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1)), completed_at TEXT,
                   PRIMARY KEY(file_id, chunk_index), CHECK(end_byte >= start_byte)
                 );
+                CREATE TABLE IF NOT EXISTS download_errors (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  job_id TEXT NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE,
+                  file_id TEXT REFERENCES download_files(id) ON DELETE CASCADE,
+                  chunk_index INTEGER, occurred_at TEXT NOT NULL,
+                  error_type TEXT NOT NULL, message TEXT NOT NULL,
+                  retryable INTEGER NOT NULL CHECK(retryable IN (0,1)),
+                  http_status INTEGER, request_attempt INTEGER,
+                  backoff_seconds REAL CHECK(backoff_seconds IS NULL OR backoff_seconds >= 0),
+                  FOREIGN KEY(file_id, chunk_index)
+                    REFERENCES download_chunks(file_id, chunk_index),
+                  CHECK((file_id IS NULL AND chunk_index IS NULL) OR file_id IS NOT NULL)
+                );
                 CREATE INDEX IF NOT EXISTS download_jobs_claim ON download_jobs(state, created_at);
                 CREATE INDEX IF NOT EXISTS download_jobs_lease ON download_jobs(state, lease_expires_at);
                 CREATE INDEX IF NOT EXISTS download_jobs_destination ON download_jobs(destination, state);
                 CREATE INDEX IF NOT EXISTS download_files_job ON download_files(job_id, relative_path);
+                CREATE INDEX IF NOT EXISTS download_errors_job ON download_errors(job_id, occurred_at);
+                CREATE INDEX IF NOT EXISTS download_errors_chunk
+                  ON download_errors(file_id, chunk_index, occurred_at);
                 """
             )
 
@@ -215,15 +366,19 @@ class SQLiteQueueStore:
     def _file(row: sqlite3.Row) -> DownloadFile:
         return DownloadFile(**{name: row[name] for name in DownloadFile.__dataclass_fields__})
 
-    def enqueue(self, model_id: str, destination: str, max_attempts: int) -> DownloadJob:
-        if max_attempts < 1:
-            raise ValueError("max_attempts must be positive")
+    @staticmethod
+    def _error(row: sqlite3.Row) -> DownloadError:
+        values = {name: row[name] for name in DownloadError.__dataclass_fields__}
+        values["retryable"] = bool(values["retryable"])
+        return DownloadError(**values)
+
+    def enqueue(self, model_id: str, destination: str) -> DownloadJob:
         now, job_id = _timestamp(), str(uuid.uuid4())
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             conflict = connection.execute(
-                "SELECT id,model_id,state,attempt,max_attempts FROM download_jobs "
+                "SELECT id,model_id,state FROM download_jobs "
                 "WHERE destination=? ORDER BY created_at DESC LIMIT 1",
                 (destination,),
             ).fetchone()
@@ -231,12 +386,11 @@ class SQLiteQueueStore:
                 if conflict["state"] in _RUNNING or conflict["state"] == "queued":
                     connection.commit()
                     return self.get(str(conflict["id"]))
-                if conflict["state"] in {"failed", "cancelled"} and (
-                    conflict["attempt"] < conflict["max_attempts"]
-                ):
+                if conflict["state"] == "failed":
                     connection.execute(
-                        "UPDATE download_jobs SET state='queued',error_code=NULL,"
-                        "error_message=NULL,completed_at=NULL,updated_at=? WHERE id=?",
+                        "UPDATE download_jobs SET state='queued',consecutive_failures=0,"
+                        "next_retry_at=NULL,error_code=NULL,error_message=NULL,"
+                        "completed_at=NULL,updated_at=? WHERE id=?",
                         (now, conflict["id"]),
                     )
                     connection.commit()
@@ -246,8 +400,9 @@ class SQLiteQueueStore:
                     f"an active download already targets this destination: {conflict['id']}"
                 )
             connection.execute(
-                "INSERT INTO download_jobs(id,model_id,destination,state,max_attempts,created_at,updated_at) VALUES(?,?,?,'queued',?,?,?)",
-                (job_id, model_id, destination, max_attempts, now, now),
+                "INSERT INTO download_jobs(id,model_id,destination,state,last_progress_at,"
+                "created_at,updated_at) VALUES(?,?,?,'queued',?,?,?)",
+                (job_id, model_id, destination, now, now, now),
             )
             connection.commit()
         except Exception:
@@ -282,6 +437,15 @@ class SQLiteQueueStore:
         with closing(self._connect()) as connection, connection:
             return [self._job(row) for row in connection.execute(sql, values)]
 
+    def file(self, file_id: str) -> DownloadFile:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                f"SELECT {_FILE_COLUMNS} FROM download_files WHERE id=?", (file_id,)
+            ).fetchone()  # noqa: S608
+        if row is None:
+            raise JobNotFoundError(file_id)
+        return self._file(row)
+
     def files(self, job_id: str) -> list[DownloadFile]:
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
@@ -302,19 +466,18 @@ class SQLiteQueueStore:
                 "UPDATE download_jobs SET state='cancelled',completed_at=?,updated_at=?,worker_id=NULL,claim_token=NULL,lease_expires_at=NULL WHERE state='cancel_requested' AND (worker_id IS NULL OR lease_expires_at<?)",
                 (now, now, now),
             )
-            connection.execute(
-                "UPDATE download_jobs SET state='failed',error_code='attempts_exhausted',error_message='Download attempts exhausted after worker lease expiry',completed_at=?,updated_at=?,worker_id=NULL,claim_token=NULL,lease_expires_at=NULL WHERE state IN ('snapshotting','downloading','verifying') AND lease_expires_at<? AND attempt>=max_attempts",
-                (now, now, now),
-            )
             row = connection.execute(
-                "SELECT id FROM download_jobs WHERE (state='queued' OR (state IN ('snapshotting','downloading','verifying') AND lease_expires_at<?)) AND attempt<max_attempts ORDER BY created_at,id LIMIT 1",
-                (now,),
+                "SELECT id FROM download_jobs WHERE state='queued' "
+                "OR (state='retry_wait' AND next_retry_at<=?) "
+                "OR (state IN ('snapshotting','downloading','verifying') AND lease_expires_at<?) "
+                "ORDER BY created_at,id LIMIT 1",
+                (now, now),
             ).fetchone()
             if row is None:
                 connection.commit()
                 return None
             claimed = connection.execute(
-                f"UPDATE download_jobs SET state=CASE WHEN snapshot_sha256 IS NULL THEN 'snapshotting' ELSE 'downloading' END,worker_id=?,claim_token=?,lease_expires_at=?,heartbeat_at=?,attempt=attempt+1,started_at=COALESCE(started_at,?),updated_at=?,error_code=NULL,error_message=NULL WHERE id=? RETURNING {_JOB_COLUMNS}",  # noqa: S608
+                f"UPDATE download_jobs SET state=CASE WHEN snapshot_sha256 IS NULL THEN 'snapshotting' ELSE 'downloading' END,worker_id=?,claim_token=?,lease_expires_at=?,heartbeat_at=?,run_count=run_count+1,started_at=COALESCE(started_at,?),updated_at=?,next_retry_at=NULL,error_code=NULL,error_message=NULL WHERE id=? RETURNING {_JOB_COLUMNS}",  # noqa: S608
                 (worker_id, token, expires, now, now, now, row["id"]),
             ).fetchone()
             connection.commit()
@@ -373,12 +536,15 @@ class SQLiteQueueStore:
                 snapshot.source.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
             )
             cursor = connection.execute(
-                "UPDATE download_jobs SET state='downloading',total_bytes=?,total_files=?,snapshot_sha256=?,source_json=?,updated_at=? WHERE id=? AND claim_token=? AND state='snapshotting'",
+                "UPDATE download_jobs SET state='downloading',total_bytes=?,total_files=?,"
+                "snapshot_sha256=?,source_json=?,last_progress_at=?,updated_at=? "
+                "WHERE id=? AND claim_token=? AND state='snapshotting'",
                 (
                     snapshot.total_bytes,
                     snapshot.file_count,
                     snapshot.snapshot_sha256,
                     source_json,
+                    now,
                     now,
                     job_id,
                     token,
@@ -479,8 +645,8 @@ class SQLiteQueueStore:
                 )
             if cursor.rowcount:
                 connection.execute(
-                    "UPDATE download_jobs SET completed_bytes=(SELECT COALESCE(SUM(completed_bytes),0) FROM download_files WHERE job_id=download_jobs.id),bytes_per_second=?,updated_at=? WHERE id=(SELECT job_id FROM download_files WHERE id=?) AND claim_token=?",
-                    (bytes_per_second, now, file_id, token),
+                    "UPDATE download_jobs SET completed_bytes=(SELECT COALESCE(SUM(completed_bytes),0) FROM download_files WHERE job_id=download_jobs.id),bytes_per_second=?,consecutive_failures=0,last_progress_at=?,updated_at=? WHERE id=(SELECT job_id FROM download_files WHERE id=?) AND claim_token=?",
+                    (bytes_per_second, now, now, file_id, token),
                 )
             connection.commit()
             return cursor.rowcount == 1
@@ -490,14 +656,132 @@ class SQLiteQueueStore:
         finally:
             connection.close()
 
-    def reset_file(self, file_id: str, token: str) -> bool:
+    def record_error(self, file_id: str, token: str, event: dict[str, Any]) -> bool:
+        now = _timestamp()
+        message = _safe_error(event.get("message") or type(event).__name__)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT f.job_id FROM download_files f JOIN download_jobs j ON j.id=f.job_id "
+                "WHERE f.id=? AND j.claim_token=? AND j.state='downloading'",
+                (file_id, token),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            connection.execute(
+                "INSERT INTO download_errors(job_id,file_id,chunk_index,occurred_at,"
+                "error_type,message,retryable,http_status,request_attempt,backoff_seconds) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    row["job_id"],
+                    file_id,
+                    event.get("chunk"),
+                    now,
+                    str(event.get("error_type") or "DownloadError")[:100],
+                    message,
+                    int(bool(event.get("retryable"))),
+                    event.get("http_status"),
+                    event.get("attempt"),
+                    event.get("backoff_seconds"),
+                ),
+            )
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def record_job_error(self, job_id: str, token: str, event: dict[str, Any]) -> bool:
+        now = _timestamp()
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                "INSERT INTO download_errors(job_id,file_id,chunk_index,occurred_at,"
+                "error_type,message,retryable,http_status,request_attempt,backoff_seconds) "
+                "SELECT id,NULL,NULL,?,?,?,?,?,?,? FROM download_jobs "
+                "WHERE id=? AND claim_token=? AND state IN "
+                "('snapshotting','downloading','verifying')",
+                (
+                    now,
+                    str(event.get("error_type") or "DownloadError")[:100],
+                    _safe_error(event.get("message")),
+                    int(bool(event.get("retryable"))),
+                    event.get("http_status"),
+                    event.get("attempt"),
+                    event.get("backoff_seconds"),
+                    job_id,
+                    token,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def errors(self, job_id: str) -> list[DownloadError]:
+        self.get(job_id)
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT id,job_id,file_id,chunk_index,occurred_at,error_type,message,"
+                "retryable,http_status,request_attempt,backoff_seconds "
+                "FROM download_errors WHERE job_id=? ORDER BY id",
+                (job_id,),
+            ).fetchall()
+        return [self._error(row) for row in rows]
+
+    def schedule_retry(
+        self,
+        job_id: str,
+        token: str,
+        *,
+        delay: float,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        now_value = _now()
+        now = _timestamp(now_value)
+        retry_at = _timestamp(now_value + timedelta(seconds=max(0.0, delay)))
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                "UPDATE download_jobs SET state='retry_wait',consecutive_failures="
+                "consecutive_failures+1,next_retry_at=?,error_code=?,error_message=?,"
+                "updated_at=?,bytes_per_second=NULL,worker_id=NULL,claim_token=NULL,"
+                "lease_expires_at=NULL,heartbeat_at=NULL WHERE id=? AND claim_token=? "
+                "AND state IN ('snapshotting','downloading','verifying')",
+                (retry_at, error_code[:100], _safe_error(error_message), now, job_id, token),
+            )
+        return cursor.rowcount == 1
+
+    def release(self, job_id: str, token: str) -> bool:
+        now = _timestamp()
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                "UPDATE download_jobs SET state='queued',next_retry_at=NULL,updated_at=?,"
+                "bytes_per_second=NULL,worker_id=NULL,claim_token=NULL,lease_expires_at=NULL,"
+                "heartbeat_at=NULL WHERE id=? AND claim_token=? "
+                "AND state IN ('snapshotting','downloading','verifying')",
+                (now, job_id, token),
+            )
+        return cursor.rowcount == 1
+
+    def reset_file(self, file_id: str, token: str, *, integrity_failure: bool = False) -> bool:
         now = _timestamp()
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
-                "UPDATE download_files SET state='failed',completed_bytes=0,computed_sha256=NULL,error_code='checksum_mismatch',error_message='Final SHA-256 verification failed',updated_at=? WHERE id=? AND job_id IN (SELECT id FROM download_jobs WHERE claim_token=?)",
-                (now, file_id, token),
+                "UPDATE download_files SET state='failed',completed_bytes=0,computed_sha256=NULL,"
+                "integrity_failures=integrity_failures+?,error_code=?,error_message=?,"
+                "updated_at=? WHERE id=? AND job_id IN "
+                "(SELECT id FROM download_jobs WHERE claim_token=?)",
+                (
+                    int(integrity_failure),
+                    "checksum_mismatch" if integrity_failure else None,
+                    "Final SHA-256 verification failed" if integrity_failure else None,
+                    now,
+                    file_id,
+                    token,
+                ),
             )
             if cursor.rowcount:
                 connection.execute(
@@ -538,8 +822,8 @@ class SQLiteQueueStore:
                     state,
                     completed_bytes,
                     sha256,
-                    error_code,
-                    (error_message or "")[:1000] or None,
+                    error_code[:100] if error_code else None,
+                    _safe_error(error_message, 1000) if error_message else None,
                     now,
                     completed_at,
                     file_id,
@@ -589,7 +873,9 @@ class SQLiteQueueStore:
                 (
                     state,
                     fields.get("error_code"),
-                    str(fields.get("error_message") or "")[:1000] or None,
+                    _safe_error(fields["error_message"], 1000)
+                    if fields.get("error_message")
+                    else None,
                     now,
                     now,
                     job_id,
@@ -630,7 +916,10 @@ class SQLiteQueueStore:
         now = _timestamp()
         with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
-                "UPDATE download_jobs SET state='queued',error_code=NULL,error_message=NULL,completed_at=NULL,worker_id=NULL,claim_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? WHERE id=? AND state IN ('failed','cancelled') AND attempt<max_attempts",
+                "UPDATE download_jobs SET state='queued',consecutive_failures=0,"
+                "next_retry_at=NULL,error_code=NULL,error_message=NULL,completed_at=NULL,"
+                "worker_id=NULL,claim_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,"
+                "updated_at=? WHERE id=? AND state='failed'",
                 (now, job_id),
             )
         if cursor.rowcount != 1:
@@ -658,19 +947,32 @@ class DownloadManager:
         max_concurrent_downloads: int = 2,
         lease_seconds: int = 120,
         poll_interval: float = 0.5,
-        max_attempts: int = 3,
         chunk_size: int = 64 * 1024 * 1024,
         range_workers: int = 4,
+        request_retries: int = 8,
+        integrity_retries: int = 2,
+        initial_backoff: float = 0.5,
+        max_backoff: float = 60.0,
+        no_progress_timeout: float = 3600.0,
+        overall_timeout: float = 0.0,
         store: QueueStore | None = None,
     ) -> None:
         if max_concurrent_downloads < 1:
             raise ValueError("max_concurrent_downloads must be positive")
         if lease_seconds < 30:
             raise ValueError("lease_seconds must be at least 30")
-        if poll_interval <= 0 or max_attempts < 1:
-            raise ValueError("poll_interval and max_attempts must be positive")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive")
         if chunk_size < 1024 * 1024 or not 1 <= range_workers <= 32:
             raise ValueError("invalid chunk size or range worker count")
+        if request_retries < 0 or integrity_retries < 0:
+            raise ValueError("retry counts must not be negative")
+        if initial_backoff <= 0 or max_backoff < initial_backoff:
+            raise ValueError("invalid retry backoff")
+        if no_progress_timeout <= 0:
+            raise ValueError("no_progress_timeout must be positive")
+        if overall_timeout < 0:
+            raise ValueError("overall_timeout must not be negative")
         self.download_directory = Path(download_directory).expanduser().resolve()
         self.download_directory.mkdir(parents=True, exist_ok=True)
         self.client, self.max_concurrent_downloads, self.lease_seconds = (
@@ -678,12 +980,17 @@ class DownloadManager:
             max_concurrent_downloads,
             lease_seconds,
         )
-        self.poll_interval, self.max_attempts, self.chunk_size, self.range_workers = (
+        self.poll_interval, self.chunk_size, self.range_workers = (
             poll_interval,
-            max_attempts,
             chunk_size,
             range_workers,
         )
+        self.request_retries = request_retries
+        self.integrity_retries = integrity_retries
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
+        self.no_progress_timeout = no_progress_timeout
+        self.overall_timeout = overall_timeout
         self.store = store or SQLiteQueueStore(Path(database_path))
         self.worker_id = f"worker-{uuid.uuid4().hex}"
         self._stop, self._wake = asyncio.Event(), asyncio.Event()
@@ -730,21 +1037,19 @@ class DownloadManager:
         self,
         model_id: str,
         destination: str | Path | None = None,
-        *,
-        max_attempts: int | None = None,
     ) -> DownloadJob:
         model = LicenseClient._model_id(model_id)
-        attempts = self.max_attempts if max_attempts is None else max_attempts
-        if attempts < 1:
-            raise ValueError("max_attempts must be positive")
         job = await asyncio.to_thread(
-            self.store.enqueue, model, str(self._destination(model, destination)), attempts
+            self.store.enqueue, model, str(self._destination(model, destination))
         )
         self._wake.set()
         return job
 
     async def get(self, job_id: str) -> DownloadJob:
         return await asyncio.to_thread(self.store.get, job_id)
+
+    async def errors(self, job_id: str) -> list[DownloadError]:
+        return await asyncio.to_thread(self.store.errors, job_id)
 
     async def list(self, *, limit: int = 100, state: JobState | None = None) -> list[DownloadJob]:
         return await asyncio.to_thread(self.store.list, limit=limit, state=state)
@@ -796,6 +1101,21 @@ class DownloadManager:
     async def _execute(self, job: DownloadJob, token: str) -> None:
         cancel = threading.Event()
         shutdown = threading.Event()
+        deadline_exceeded = threading.Event()
+        deadline = (
+            datetime.fromisoformat(job.started_at) + timedelta(seconds=self.overall_timeout)
+            if self.overall_timeout and job.started_at
+            else None
+        )
+
+        def should_stop() -> bool:
+            if cancel.is_set() or shutdown.is_set():
+                return True
+            if deadline is not None and _now() >= deadline:
+                deadline_exceeded.set()
+                return True
+            return False
+
         self._cancel_events[job.id] = cancel
         self._shutdown_events[job.id] = shutdown
         heartbeat = asyncio.create_task(self._heartbeat(job.id, token, cancel, shutdown))
@@ -812,12 +1132,37 @@ class DownloadManager:
                 token,
                 chunk_size=self.chunk_size,
                 workers=self.range_workers,
-                should_cancel=lambda: cancel.is_set() or shutdown.is_set(),
+                request_retries=self.request_retries,
+                initial_backoff=self.initial_backoff,
+                max_backoff=self.max_backoff,
+                should_cancel=should_stop,
             )
             if not await asyncio.to_thread(self.store.finish, job.id, token, "completed"):
                 raise DownloadCancelled("download lease was lost")
         except DownloadCancelled:
-            if not shutdown.is_set():
+            current = await asyncio.to_thread(self.store.get, job.id)
+            if shutdown.is_set():
+                await asyncio.to_thread(self.store.release, job.id, token)
+            elif deadline_exceeded.is_set():
+                await asyncio.to_thread(
+                    self.store.record_job_error,
+                    job.id,
+                    token,
+                    {
+                        "error_type": "overall_timeout",
+                        "message": "Download exceeded the configured overall timeout",
+                        "retryable": False,
+                    },
+                )
+                await asyncio.to_thread(
+                    self.store.finish,
+                    job.id,
+                    token,
+                    "failed",
+                    error_code="overall_timeout",
+                    error_message="Download exceeded the configured overall timeout",
+                )
+            elif current.state == "cancel_requested":
                 await asyncio.to_thread(
                     self.store.finish,
                     job.id,
@@ -826,19 +1171,104 @@ class DownloadManager:
                     error_code="cancelled",
                     error_message="Download cancelled",
                 )
+            else:
+                await asyncio.to_thread(self.store.release, job.id, token)
+                self._wake.set()
         except Exception as exc:
             current = await asyncio.to_thread(self.store.get, job.id)
             cancelled = current.state == "cancel_requested"
-            await asyncio.to_thread(
-                self.store.finish,
-                job.id,
-                token,
-                "cancelled" if cancelled else "failed",
-                error_code="cancelled" if cancelled else type(exc).__name__,
-                error_message=(
-                    "Download cancelled" if cancelled else f"Download failed ({type(exc).__name__})"
-                ),
-            )
+            if cancelled:
+                await asyncio.to_thread(
+                    self.store.finish,
+                    job.id,
+                    token,
+                    "cancelled",
+                    error_code="cancelled",
+                    error_message="Download cancelled",
+                )
+            else:
+                now = _now()
+                last_progress = datetime.fromisoformat(current.last_progress_at)
+                stalled = (now - last_progress).total_seconds() >= self.no_progress_timeout
+                integrity_exhausted = False
+                if isinstance(exc, ChecksumMismatchError):
+                    failed_files = [
+                        item
+                        for item in await asyncio.to_thread(self.store.files, job.id)
+                        if item.integrity_failures > self.integrity_retries
+                    ]
+                    integrity_exhausted = bool(failed_files)
+                retryable = (
+                    isinstance(
+                        exc,
+                        (
+                            RetryableDownloadError,
+                            TransientModelDownloadError,
+                            ChecksumMismatchError,
+                        ),
+                    )
+                    and not stalled
+                    and not integrity_exhausted
+                )
+                if retryable:
+                    cap = min(
+                        self.max_backoff,
+                        self.initial_backoff * (2 ** min(current.consecutive_failures, 16)),
+                    )
+                    delay = secrets.randbelow(max(1, int(cap * 1000) + 1)) / 1000
+                    await asyncio.to_thread(
+                        self.store.record_job_error,
+                        job.id,
+                        token,
+                        {
+                            "error_type": type(exc).__name__,
+                            "message": f"Temporary download failure ({type(exc).__name__})",
+                            "retryable": True,
+                            "backoff_seconds": delay,
+                        },
+                    )
+                    await asyncio.to_thread(
+                        self.store.schedule_retry,
+                        job.id,
+                        token,
+                        delay=delay,
+                        error_code=type(exc).__name__,
+                        error_message=f"Temporary download failure ({type(exc).__name__})",
+                    )
+                    self._wake.set()
+                else:
+                    error_code = (
+                        "no_progress_timeout"
+                        if stalled
+                        else "integrity_retries_exhausted"
+                        if integrity_exhausted
+                        else type(exc).__name__
+                    )
+                    message = (
+                        "Download made no progress before the configured timeout"
+                        if stalled
+                        else "Download failed repeated integrity verification"
+                        if integrity_exhausted
+                        else f"Download failed ({type(exc).__name__})"
+                    )
+                    await asyncio.to_thread(
+                        self.store.record_job_error,
+                        job.id,
+                        token,
+                        {
+                            "error_type": error_code,
+                            "message": message,
+                            "retryable": False,
+                        },
+                    )
+                    await asyncio.to_thread(
+                        self.store.finish,
+                        job.id,
+                        token,
+                        "failed",
+                        error_code=error_code,
+                        error_message=message,
+                    )
         finally:
             cancel.set()
             heartbeat.cancel()

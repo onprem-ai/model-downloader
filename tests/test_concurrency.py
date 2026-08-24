@@ -32,7 +32,7 @@ def persisted_snapshot() -> ModelSnapshot:
 
 def test_concurrent_stores_claim_job_once(tmp_path: Path) -> None:
     path = tmp_path / "queue.sqlite"
-    SQLiteQueueStore(path).enqueue("example", str(tmp_path / "model"), 3)
+    SQLiteQueueStore(path).enqueue("example", str(tmp_path / "model"))
     barrier = threading.Barrier(2)
 
     def claim(number: int):
@@ -45,19 +45,20 @@ def test_concurrent_stores_claim_job_once(tmp_path: Path) -> None:
     assert sum(result is not None for result in results) == 1
 
 
-def test_expired_exhausted_job_becomes_failed(tmp_path: Path, monkeypatch) -> None:
+def test_expired_lease_is_reclaimed_without_attempt_limit(tmp_path: Path, monkeypatch) -> None:
     import opai_models.manager as module
 
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue("example", str(tmp_path / "model"), 1)
+    job = store.enqueue("example", str(tmp_path / "model"))
     current = [datetime(2026, 1, 1, tzinfo=UTC)]
     monkeypatch.setattr(module, "_now", lambda: current[0])
-    assert store.claim("worker", 30)
+    first = store.claim("worker", 30)
     current[0] = datetime(2026, 1, 1, 0, 1, tzinfo=UTC)
-    assert store.claim("other", 30) is None
-    failed = store.get(job.id)
-    assert failed.state == "failed"
-    assert failed.error_code == "attempts_exhausted"
+    second = store.claim("other", 30)
+    assert first and second
+    assert second[0].id == job.id
+    assert second[0].run_count == 2
+    assert second[1] != first[1]
 
 
 @pytest.mark.asyncio
@@ -85,4 +86,4 @@ async def test_graceful_close_leaves_active_job_reclaimable(tmp_path: Path) -> N
     await manager.start()
     await __import__("asyncio").wait_for(entered.wait(), 1)
     await manager.close()
-    assert (await manager.get(job.id)).state == "downloading"
+    assert (await manager.get(job.id)).state == "queued"

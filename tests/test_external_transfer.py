@@ -30,7 +30,7 @@ def test_external_state_download_records_only_durable_chunks(tmp_path: Path) -> 
     partial = tmp_path / "file"
     partial.write_bytes(b"abc" + b"\0" * 3)
 
-    def ranged(provider, descriptor, start, end, retries, timeout, should_cancel):
+    def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
         os.pwrite(descriptor, content[start : end + 1], start)
         return end - start + 1
 
@@ -99,7 +99,7 @@ def test_external_state_rejects_invalid_chunks_and_final_hash(tmp_path: Path) ->
             client, "example", "file", tmp_path / "file", completed_chunks={2}, **arguments
         )
 
-    def corrupt(provider, descriptor, start, end, retries, timeout, should_cancel):
+    def corrupt(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
         os.pwrite(descriptor, b"x" * (end - start + 1), start)
         return end - start + 1
 
@@ -120,7 +120,7 @@ def test_external_state_accepts_missing_provider_checksum(tmp_path: Path) -> Non
         **{**client.access.return_value.__dict__, "checksums": {}}
     )
 
-    def ranged(provider, descriptor, start, end, retries, timeout, should_cancel):
+    def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
         os.pwrite(descriptor, content[start : end + 1], start)
         return end - start + 1
 

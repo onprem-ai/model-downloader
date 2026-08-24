@@ -4,6 +4,7 @@ from opai_models.async_client import AsyncModelClient
 from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
 from opai_models.download import DownloadCancelled
 from opai_models.manager import (
+    DownloadError,
     DownloadFile,
     DownloadJob,
     DownloadManager,
@@ -18,6 +19,7 @@ __version__ = "0.1.0"
 __all__ = [
     "AsyncModelClient",
     "DownloadCancelled",
+    "DownloadError",
     "DownloadFile",
     "DownloadJob",
     "DownloadManager",

@@ -64,7 +64,12 @@ opai-models pull example example \
   --database /var/lib/opai-models/downloads.sqlite \
   --chunk-size 67108864 \
   --workers 4 \
-  --retries 3
+  --request-retries 8 \
+  --integrity-retries 2 \
+  --initial-backoff 0.5 \
+  --max-backoff 60 \
+  --no-progress-timeout 3600 \
+  --overall-timeout 0
 ```
 
 The argument is the model ID, not an S3 path. The downloader never needs a
@@ -73,8 +78,13 @@ License Server maps the model ID to storage and returns short-lived download
 URLs.
 
 The default API is `https://license.api.onprem.ai`. Interrupted downloads resume
-from the local SQLite queue and chunk state. Keep that database on local storage,
-not NFS.
+from durable per-file, per-chunk state. Transient failures enter `retry_wait` and
+resume automatically with exponential full-jitter backoff. A successful chunk
+resets the consecutive-failure count; the job fails only after the configured
+no-progress timeout or a permanent error. Detailed sanitized errors are retained
+against the affected job, file, and chunk. Keep the SQLite database on local
+storage, not NFS. If the database schema is incompatible, delete the database
+and let the downloader create a new one.
 
 ### Verification controls
 

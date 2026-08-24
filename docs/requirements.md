@@ -90,6 +90,7 @@ await manager.close()
 await manager.enqueue("example", destination="example")
 await manager.get(job_id)
 await manager.list(...)
+await manager.errors(job_id)
 await manager.cancel(job_id)
 await manager.retry(job_id)
 await manager.wait(job_id)
@@ -121,10 +122,11 @@ Requirements:
 - `pull` enqueues one model-directory job, starts a local manager, and watches it
   until a terminal state.
 - Show aggregate model progress: files verified, total files, completed bytes,
-  expected bytes, transfer rate, attempt, and state.
+  expected bytes, transfer rate, run count, and state.
 - `Ctrl-C` stops the foreground process without marking the durable job as a
-  user cancellation; after lease expiry, another manager resumes valid partial
-  data. Explicit `manager.cancel(job_id)` performs cooperative cancellation.
+  user cancellation; graceful shutdown releases its lease immediately so another
+  manager can resume valid partial data. Explicit `manager.cancel(job_id)`
+  performs cooperative cancellation.
 - `--json` emits stable machine-readable events and errors.
 - Interactive license entry uses a no-echo prompt.
 - Noninteractive license input uses a configurable environment variable; the
@@ -143,7 +145,8 @@ For every file, collect and persist:
 - relative path within the model directory;
 - expected size in bytes;
 - server-provided `source_id`;
-- expected SHA-256 from the model's authoritative `SHA256SUMS`;
+- expected SHA-256 from the model's authoritative `SHA256SUMS` when checksum or
+  signature verification is enabled;
 - provider SHA-256 as an additional consistency check when available;
 - ETag when available;
 - object version ID when available.
@@ -155,9 +158,11 @@ At job level, persist:
 - total expected bytes;
 - deterministic snapshot SHA-256.
 
-The snapshot hash is SHA-256 over the exact canonical `SHA256SUMS` bytes. It must
-not include credentials, signed URLs, timestamps, source provenance, local
-destinations, or transfer state.
+When checksum or signature verification is enabled, the snapshot hash is
+SHA-256 over the exact canonical `SHA256SUMS` bytes. With both checks explicitly
+disabled, it is instead derived from the authenticated file paths, sizes, and
+source identities. It never includes credentials, signed URLs, timestamps,
+source provenance, local destinations, or transfer state.
 
 After snapshot creation, retries use that exact snapshot. If current access
 metadata differs in source identity, size, or an expected checksum, stop with a
@@ -179,7 +184,7 @@ One row per model directory:
 - total/verified file counts;
 - expected/completed bytes;
 - current transfer rate;
-- attempt and maximum attempts;
+- restart count, consecutive failures, next retry time, and last progress time;
 - snapshot SHA-256;
 - sanitized error code/message;
 - created, updated, started, and completed timestamps;
@@ -205,6 +210,19 @@ One row per file range:
 - start and inclusive end byte;
 - completion state and completion timestamp.
 
+### `download_errors`
+
+Append-only sanitized failure history:
+
+- job ID and timestamp;
+- optional file ID and chunk index, linked by foreign key to `download_chunks`;
+- safe error type and message;
+- retryable classification, HTTP status, request attempt, and backoff duration.
+
+No error row may contain a signed URL, license key, authorization header, or
+credential. The database is disposable: an incompatible database must be
+deleted and recreated.
+
 Constraints and indexes must enforce valid states, nonnegative sizes, unique
 `(job_id, relative_path)`, unique `(file_id, chunk_index)`, and efficient claim,
 lease, and status queries.
@@ -220,6 +238,7 @@ Job states:
 queued
 snapshotting
 downloading
+retry_wait
 verifying
 completed
 failed
@@ -244,10 +263,16 @@ Rules:
 - A queued cancellation becomes `cancelled` without running.
 - An active cancellation becomes `cancel_requested`; workers stop cooperatively
   between blocks/chunks and finalize it as `cancelled`.
+- Transient failures enter `retry_wait` and are resumed automatically after
+  exponential full-jitter backoff.
+- Every completed chunk resets consecutive failures and the no-progress clock.
+- The overall job duration is unlimited by default; a job fails only after its
+  configurable no-progress timeout or a permanent error.
+- Integrity failures use a separate bounded retry budget.
 - Failures retain verified files and safe partials for retry.
 - Retry only downloads failed or incomplete files and never redownloads files
   whose local size and computed checksum still match the snapshot.
-- A terminal job cannot be retried when its maximum attempt count is exhausted.
+- A failed job can be explicitly retried; transient failures retry automatically while progress remains within the configured timeout.
 - Re-enqueuing the same model ID and destination attaches to the active job,
   enabling a restarted CLI to resume it. A different model targeting the same
   final destination or staging tree is rejected.
@@ -263,15 +288,13 @@ on one host sharing one local database file.
 - Claim under `BEGIN IMMEDIATE`; select and transition the oldest eligible job
   while holding SQLite's writer lock.
 - Assign a random claim/fencing token and lease expiry on every claim.
-- Increment attempt count atomically with claim.
+- Increment the informational run count atomically with claim.
 - Every heartbeat, progress update, completion, failure, and cancellation
   finalization must match both job ID and current claim token.
 - A stale worker whose lease was reclaimed must be unable to mutate the job.
 - Workers heartbeat substantially faster than lease expiry.
-- Expired `snapshotting`, `downloading`, or `verifying` jobs may be reclaimed if
-  attempts remain.
-- Expired jobs with no attempts remaining become `failed` rather than remaining
-  stuck.
+- Expired `snapshotting`, `downloading`, or `verifying` jobs are reclaimable
+  without consuming a finite lifetime retry budget.
 - A cancellation held by a dead worker becomes `cancelled` after lease expiry.
 - Polling is the reliable wake-up mechanism; in-process events are only a latency
   optimization.
@@ -308,6 +331,13 @@ claim of exactly-once execution.
   bytes, unsafe URL schemes, and source changes.
 - Use restrictive permissions for staging files and queue databases.
 - Preserve partial files after ordinary failure or cancellation.
+- Process shutdown releases the lease immediately and leaves work queued;
+  `cancelled` is reserved for explicit user cancellation.
+- Retry temporary network/DNS failures and HTTP `408`, `429`, `500`, `502`,
+  `503`, and `504`; honor bounded `Retry-After` and refresh access after
+  `401`/`403`.
+- Fail immediately on source identity changes, invalid ranges, unsafe paths,
+  disk exhaustion, read-only filesystems, and permission failures.
 - On final checksum failure, clear completed-chunk claims so retry re-downloads
   all content rather than trusting corrupt bytes.
 - Sanitize all durable and operator-facing errors; cap message lengths.
@@ -325,7 +355,9 @@ Download into a job-specific sibling staging directory, for example:
 
 After every payload file verifies:
 
-1. Write `SHA256SUMS` using the conventional `sha256sum` text format.
+1. When checksum or signature verification is enabled, write `SHA256SUMS` using
+   the conventional `sha256sum` text format. Never fabricate it when checksum
+   verification is explicitly disabled and the server has no manifest.
 2. Write `.source.json` containing only validated durable provenance.
 3. Flush files and directory metadata as supported by the platform.
 4. Atomically rename the staging directory to the final model directory.
@@ -459,7 +491,7 @@ Required automated coverage includes:
 - lease expiry/reclaim and fencing stale workers;
 - heartbeat renewal;
 - queued and active cancellation;
-- retry and attempt exhaustion;
+- transient retry scheduling, no-progress timeout, and error history;
 - restart recovery;
 - destination conflict/traversal prevention;
 - absence of credentials and signed URLs in logs, databases, and metadata files;

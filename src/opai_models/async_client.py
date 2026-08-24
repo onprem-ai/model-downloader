@@ -176,8 +176,10 @@ class AsyncModelClient:
         *,
         chunk_size: int = 64 * 1024 * 1024,
         workers: int = 4,
-        retries: int = 5,
+        request_retries: int = 8,
         timeout: float = 60,
+        initial_backoff: float = 0.5,
+        max_backoff: float = 60.0,
         should_cancel: CancelCallback | None = None,
     ) -> Path:
         """Download a persisted immutable model snapshot and publish it atomically."""
@@ -258,6 +260,10 @@ class AsyncModelClient:
                 if not updated:
                     raise DownloadCancelled("download lease was lost")
 
+            def record_error(event: dict[str, Any]) -> None:
+                if not store.record_error(item.id, claim_token, event):
+                    raise DownloadCancelled("download lease was lost")
+
             try:
                 async with semaphore:
                     await asyncio.to_thread(
@@ -273,13 +279,31 @@ class AsyncModelClient:
                         mark_complete=mark_complete,
                         chunk_size=chunk_size,
                         workers=workers,
-                        retries=retries,
+                        request_retries=request_retries,
                         timeout=timeout,
+                        initial_backoff=initial_backoff,
+                        max_backoff=max_backoff,
                         should_cancel=should_cancel,
+                        on_error=record_error,
                         verify_checksum=self.verify_checksums,
                     )
-            except ChecksumMismatchError:
-                await asyncio.to_thread(store.reset_file, item.id, claim_token)
+            except ChecksumMismatchError as exc:
+                await asyncio.to_thread(
+                    store.record_error,
+                    item.id,
+                    claim_token,
+                    {
+                        "error_type": type(exc).__name__,
+                        "message": "Final SHA-256 verification failed",
+                        "retryable": True,
+                    },
+                )
+                await asyncio.to_thread(
+                    store.reset_file,
+                    item.id,
+                    claim_token,
+                    integrity_failure=True,
+                )
                 raise
             digest = (
                 await asyncio.to_thread(_file_sha256, target)
@@ -287,8 +311,23 @@ class AsyncModelClient:
                 else item.expected_sha256
             )
             if self.verify_checksums and digest != item.expected_sha256:
-                await asyncio.to_thread(store.reset_file, item.id, claim_token)
-                raise ModelDownloadError(
+                await asyncio.to_thread(
+                    store.record_error,
+                    item.id,
+                    claim_token,
+                    {
+                        "error_type": "ChecksumMismatchError",
+                        "message": "Final SHA-256 verification failed",
+                        "retryable": True,
+                    },
+                )
+                await asyncio.to_thread(
+                    store.reset_file,
+                    item.id,
+                    claim_token,
+                    integrity_failure=True,
+                )
+                raise ChecksumMismatchError(
                     f"final SHA-256 verification failed for {item.relative_path}"
                 )
             if not await asyncio.to_thread(

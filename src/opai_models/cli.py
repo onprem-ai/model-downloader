@@ -81,7 +81,17 @@ def build_parser() -> argparse.ArgumentParser:
     pull_parser.add_argument("--database", type=Path, default=Path(".opai-model-downloads.sqlite"))
     pull_parser.add_argument("--chunk-size", type=int, default=64 * 1024 * 1024)
     pull_parser.add_argument("--workers", type=int, default=4)
-    pull_parser.add_argument("--retries", type=int, default=3)
+    pull_parser.add_argument("--request-retries", type=int, default=8)
+    pull_parser.add_argument("--integrity-retries", type=int, default=2)
+    pull_parser.add_argument("--initial-backoff", type=float, default=0.5)
+    pull_parser.add_argument("--max-backoff", type=float, default=60.0)
+    pull_parser.add_argument("--no-progress-timeout", type=float, default=3600.0)
+    pull_parser.add_argument(
+        "--overall-timeout",
+        type=float,
+        default=0.0,
+        help="maximum total seconds, or 0 for unlimited",
+    )
     pull_parser.add_argument(
         "--sigstore-identity",
         default=os.environ.get(DEFAULT_SIGSTORE_IDENTITY_ENV),
@@ -125,9 +135,14 @@ async def _pull(args: argparse.Namespace, license_provider) -> int:
         args.download_directory,
         client,
         max_concurrent_downloads=1,
-        max_attempts=args.retries,
         chunk_size=args.chunk_size,
         range_workers=args.workers,
+        request_retries=args.request_retries,
+        integrity_retries=args.integrity_retries,
+        initial_backoff=args.initial_backoff,
+        max_backoff=args.max_backoff,
+        no_progress_timeout=args.no_progress_timeout,
+        overall_timeout=args.overall_timeout,
     )
     try:
         # Enqueue before starting workers so a duplicate destination cannot

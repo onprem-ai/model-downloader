@@ -11,8 +11,12 @@ from opai_models.cli import _human_size, _license_key, _progress, main
 from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
 from opai_models.download import (
     AccessProvider,
+    PermanentDownloadError,
+    _backoff_delay,
     _download_range,
     _expected_sha256,
+    _permanent_os_error,
+    _retry_after,
 )
 
 
@@ -83,7 +87,7 @@ def test_client_maps_bad_json_and_invalid_metadata() -> None:
         with pytest.raises(ModelDownloadError, match="invalid response"):
             client.access("example", "a")
     with patch("urllib.request.urlopen", return_value=io.BytesIO(b"not-json")):
-        with pytest.raises(ModelDownloadError, match="Cannot read"):
+        with pytest.raises(ModelDownloadError, match="invalid JSON"):
             client.access("example", "a")
     with patch.object(client, "_json", return_value={"path": "wrong"}):
         with pytest.raises(ModelDownloadError, match="invalid model metadata"):
@@ -194,6 +198,85 @@ def test_download_range_maps_terminal_http_errors(
                 )
     finally:
         os.close(descriptor)
+
+
+def test_retry_after_backoff_and_permanent_disk_errors(monkeypatch) -> None:
+    monkeypatch.setattr("opai_models.download.time.time", lambda: 0)
+    monkeypatch.setattr("opai_models.download.secrets.randbelow", lambda maximum: maximum - 1)
+    assert _retry_after("12") == 12
+    assert _retry_after("Thu, 01 Jan 1970 00:00:20 GMT") == 20
+    assert _retry_after("invalid") is None
+    assert _backoff_delay(2, 0.5, 60, None) < 2.001
+    assert _backoff_delay(2, 0.5, 60, 10) == 10
+    assert _permanent_os_error(OSError(28, "full"))
+    assert not _permanent_os_error(OSError(104, "reset"))
+
+
+def test_download_range_records_retry_after_and_retries(tmp_path: Path) -> None:
+    client = MagicMock()
+    client.access.return_value = model_access()
+    provider = AccessProvider(client, "example", "test.bin")
+    descriptor = os.open(tmp_path / "partial", os.O_RDWR | os.O_CREAT, 0o600)
+    error = urllib.error.HTTPError("https://s3.example", 429, "busy", {"Retry-After": "7"}, None)
+    errors = []
+    try:
+        with (
+            patch("urllib.request.urlopen", side_effect=[error, RangeResponse(b"abc")]),
+            patch("time.sleep") as sleep,
+            patch("secrets.randbelow", return_value=0),
+        ):
+            assert (
+                _download_range(
+                    provider,
+                    descriptor,
+                    0,
+                    2,
+                    1,
+                    1,
+                    chunk_index=4,
+                    on_error=errors.append,
+                )
+                == 3
+            )
+    finally:
+        os.close(descriptor)
+    assert errors == [
+        {
+            "chunk": 4,
+            "attempt": 1,
+            "error_type": "RetryableDownloadError",
+            "message": "storage temporarily returned HTTP 429",
+            "retryable": True,
+            "http_status": 429,
+            "backoff_seconds": 7,
+        }
+    ]
+    sleep.assert_called_once_with(7)
+
+
+def test_download_range_treats_disk_full_as_permanent(tmp_path: Path) -> None:
+    client = MagicMock()
+    client.access.return_value = model_access()
+    provider = AccessProvider(client, "example", "test.bin")
+    descriptor = os.open(tmp_path / "partial", os.O_RDWR | os.O_CREAT, 0o600)
+    errors = []
+    try:
+        with patch("urllib.request.urlopen", side_effect=OSError(28, "disk full")):
+            with pytest.raises(PermanentDownloadError):
+                _download_range(
+                    provider,
+                    descriptor,
+                    0,
+                    2,
+                    8,
+                    1,
+                    chunk_index=2,
+                    on_error=errors.append,
+                )
+    finally:
+        os.close(descriptor)
+    assert errors[0]["chunk"] == 2
+    assert errors[0]["retryable"] is False
 
 
 def test_download_range_refreshes_after_403_then_succeeds(tmp_path: Path) -> None:
