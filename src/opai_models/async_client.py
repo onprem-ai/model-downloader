@@ -3,11 +3,16 @@
 import asyncio
 import hashlib
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from opai_models.client import LicenseClient, LicenseKeyProvider, ModelAccess, ModelDownloadError
+from opai_models.client import (
+    AsyncLicenseProvider,
+    ModelAccess,
+    ModelDownloadError,
+    _AsyncLicenseTransport,
+)
 from opai_models.download import (
     CancelCallback,
     ChecksumMismatchError,
@@ -105,19 +110,33 @@ def _write_bytes(path: Path, data: bytes) -> None:
         os.fsync(stream.fileno())
 
 
+def _prepare_staging(destination: Path, job_id: str) -> Path:
+    staging = destination.with_name(f".{destination.name}.{job_id}.partial")
+    if staging.is_symlink():
+        raise ModelDownloadError("staging path must not be a symbolic link")
+    staging.mkdir(parents=True, exist_ok=True, mode=0o700)
+    staging.chmod(0o700)
+    return staging
+
+
+def _candidate_state(path: Path, expected_size: int) -> tuple[bool, bool]:
+    exists = path.is_file()
+    return exists, exists and path.stat().st_size == expected_size
+
+
 class AsyncModelClient:
     """Reusable async facade over the dependency-free transfer implementation.
 
     HTTP requests use one reusable native-async HTTPX connection pool. Blocking
     filesystem, SQLite, hashing, and signature work is offloaded from the event
     loop. Credentials are requested for each API request and never persisted.
-    The provider may return a string directly or return an awaitable string.
+    The credential provider is async and is awaited for each authenticated request.
     """
 
     def __init__(
         self,
         api_url: str,
-        license_provider: LicenseKeyProvider,
+        license_provider: AsyncLicenseProvider,
         *,
         timeout: float = 30,
         verify_checksums: bool = True,
@@ -134,7 +153,7 @@ class AsyncModelClient:
         self.api_url = api_url
         self.license_provider = license_provider
         self.timeout = timeout
-        self._client = LicenseClient(api_url, license_provider, timeout)
+        self._client = _AsyncLicenseTransport(api_url, license_provider, timeout)
         self.verify_checksums = verify_checksums
         self.verify_signatures = verify_signatures
         self.sigstore_identity = (
@@ -162,7 +181,7 @@ class AsyncModelClient:
 
     async def get_source(self, model_id: str) -> SourceDocument:
         """Fetch and validate provenance without retaining access material."""
-        model = LicenseClient._model_id(model_id)
+        model = _AsyncLicenseTransport._model_id(model_id)
         data = await self._client.read_small(model, ".source.json")
         return parse_source(data)
 
@@ -178,7 +197,7 @@ class AsyncModelClient:
         request_retries: int = 8,
         initial_backoff: float = 0.5,
         max_backoff: float = 60.0,
-        progress: Callable[[dict[str, Any]], None] | None = None,
+        progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> "SyncResult":
         """Synchronize an existing model directory from its durable manifest."""
         from opai_models.sync import sync_model
@@ -213,11 +232,11 @@ class AsyncModelClient:
         should_cancel: CancelCallback | None = None,
     ) -> Path:
         """Download a persisted immutable model snapshot and publish it atomically."""
-        destination = destination.expanduser().resolve()
+        destination = await asyncio.to_thread(lambda: destination.expanduser().resolve())
         job = await asyncio.to_thread(store.get, job_id)
         files = await asyncio.to_thread(store.files, job_id)
         source = await asyncio.to_thread(store.source, job_id)
-        if destination.exists():
+        if await asyncio.to_thread(destination.exists):
             if await asyncio.to_thread(
                 _completed_directory_matches,
                 destination,
@@ -241,11 +260,7 @@ class AsyncModelClient:
                         raise DownloadCancelled("download lease was lost")
                 return destination
             raise ModelDownloadError("existing destination does not match model snapshot")
-        staging = destination.with_name(f".{destination.name}.{job_id}.partial")
-        if staging.is_symlink():
-            raise ModelDownloadError("staging path must not be a symbolic link")
-        staging.mkdir(parents=True, exist_ok=True, mode=0o700)
-        staging.chmod(0o700)
+        staging = await asyncio.to_thread(_prepare_staging, destination, job_id)
         if not files or not job.snapshot_sha256:
             raise ModelDownloadError("job has no immutable model snapshot")
 
@@ -254,8 +269,11 @@ class AsyncModelClient:
         async def transfer(item: Any) -> None:
             if item.state == "completed":
                 candidate = staging / item.relative_path
-                reusable = candidate.is_file() and (
-                    candidate.stat().st_size == item.expected_size
+                candidate_exists, candidate_size_matches = await asyncio.to_thread(
+                    _candidate_state, candidate, item.expected_size
+                )
+                reusable = candidate_exists and (
+                    candidate_size_matches
                     if not self.verify_checksums
                     else await asyncio.to_thread(_matches, candidate, item.expected_sha256)
                 )
@@ -264,20 +282,26 @@ class AsyncModelClient:
                 if not await asyncio.to_thread(store.reset_file, item.id, claim_token):
                     raise DownloadCancelled("download lease was lost")
             target = await asyncio.to_thread(_secure_parent, staging, item.relative_path)
-            if target.is_symlink():
+            if await asyncio.to_thread(target.is_symlink):
                 raise ModelDownloadError("staging file must not be a symbolic link")
             await asyncio.to_thread(
                 store.prepare_chunks, item.id, claim_token, item.expected_size, chunk_size
             )
 
             completed = await asyncio.to_thread(store.completed_chunks, item.id)
-            if completed and (not target.is_file() or target.stat().st_size != item.expected_size):
+            target_exists, target_size_matches = await asyncio.to_thread(
+                _candidate_state, target, item.expected_size
+            )
+            if completed and (not target_exists or not target_size_matches):
                 if not await asyncio.to_thread(store.reset_file, item.id, claim_token):
                     raise DownloadCancelled("download lease was lost")
                 completed = set()
 
-            def mark_complete(chunk: int, completed_bytes: int, bytes_per_second: int) -> None:
-                updated = store.record_progress(
+            async def mark_complete(
+                chunk: int, completed_bytes: int, bytes_per_second: int
+            ) -> None:
+                updated = await asyncio.to_thread(
+                    store.record_progress,
                     item.id,
                     claim_token,
                     {
@@ -290,8 +314,8 @@ class AsyncModelClient:
                 if not updated:
                     raise DownloadCancelled("download lease was lost")
 
-            def record_error(event: dict[str, Any]) -> None:
-                if not store.record_error(item.id, claim_token, event):
+            async def record_error(event: dict[str, Any]) -> None:
+                if not await asyncio.to_thread(store.record_error, item.id, claim_token, event):
                     raise DownloadCancelled("download lease was lost")
 
             try:

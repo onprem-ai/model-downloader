@@ -1,7 +1,7 @@
 """OnPrem AI model downloader public API."""
 
 from opai_models.async_client import AsyncModelClient
-from opai_models.client import LicenseClient, LicenseKeyProvider, ModelAccess, ModelDownloadError
+from opai_models.client import AsyncLicenseProvider, ModelAccess, ModelDownloadError
 from opai_models.download import DownloadCancelled
 from opai_models.manager import (
     DownloadError,
@@ -12,7 +12,7 @@ from opai_models.manager import (
     JobNotFoundError,
 )
 from opai_models.metadata import SourceDocument
-from opai_models.signatures import SigstoreIdentity, verify_sigstore_bundle
+from opai_models.signatures import SigstoreIdentity
 from opai_models.snapshot import ModelFile, ModelSnapshot
 from opai_models.sync import SyncResult
 
@@ -26,8 +26,7 @@ __all__ = [
     "DownloadManager",
     "JobConflictError",
     "JobNotFoundError",
-    "LicenseClient",
-    "LicenseKeyProvider",
+    "AsyncLicenseProvider",
     "ModelAccess",
     "ModelDownloadError",
     "ModelFile",
@@ -35,5 +34,4 @@ __all__ = [
     "SigstoreIdentity",
     "SourceDocument",
     "SyncResult",
-    "verify_sigstore_bundle",
 ]

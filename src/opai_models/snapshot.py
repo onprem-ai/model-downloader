@@ -5,7 +5,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from opai_models.client import LicenseClient, ModelDownloadError
+from opai_models.client import ModelDownloadError, _AsyncLicenseTransport
 from opai_models.metadata import (
     SourceDocument,
     parse_sha256sums,
@@ -86,7 +86,7 @@ def _sha256(value: str | None) -> str | None:
 
 
 async def snapshot_model(
-    client: LicenseClient,
+    client: _AsyncLicenseTransport,
     model_id: str,
     *,
     verify_checksums: bool = True,
@@ -94,7 +94,7 @@ async def snapshot_model(
     trusted_identity: SigstoreIdentity | None = None,
     sigstore_offline: bool = False,
 ) -> ModelSnapshot:
-    model = LicenseClient._model_id(model_id)
+    model = _AsyncLicenseTransport._model_id(model_id)
     listings: list[dict[str, object]] = []
     pending = [""]
     visited: set[str] = set()
@@ -111,7 +111,7 @@ async def snapshot_model(
                 raise ModelDownloadError(
                     "model listing returned a prefix outside the requested prefix"
                 )
-            LicenseClient._relative_path(child_prefix, prefix=True)
+            _AsyncLicenseTransport._relative_path(child_prefix, prefix=True)
             pending.append(child_prefix)
 
     listed: dict[str, int] = {}
@@ -125,7 +125,7 @@ async def snapshot_model(
                 raise ModelDownloadError(
                     "License Server returned an invalid model listing"
                 ) from None
-            relative = LicenseClient._relative_path(object_path)
+            relative = _AsyncLicenseTransport._relative_path(object_path)
             listing_prefix = str(listing.get("prefix") or "")
             if listing_prefix and not relative.startswith(listing_prefix):
                 raise ModelDownloadError(

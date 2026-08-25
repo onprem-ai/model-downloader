@@ -2,18 +2,19 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from conftest import secret_key
 
-from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
+from opai_models.client import ModelAccess, ModelDownloadError, _AsyncLicenseTransport
 
 
 def metadata_access(size: int, url: str = "https://s3.example/meta") -> ModelAccess:
     return ModelAccess(".source.json", url, size, "source", "later", {}, {})
 
 
-def client(handler) -> LicenseClient:
-    return LicenseClient(
+def client(handler) -> _AsyncLicenseTransport:
+    return _AsyncLicenseTransport(
         "https://license.example",
-        lambda: "secret",
+        secret_key,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
 

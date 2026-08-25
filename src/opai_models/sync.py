@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import inspect
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from opai_models.download import pull_file_with_state
 from opai_models.metadata import parse_sha256sums
 from opai_models.signatures import verify_sigstore_bundle
 
-SyncProgress = Callable[[dict[str, Any]], None]
+SyncProgress = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,37 @@ def _replace_directory(staging: Path, destination: Path, backup: Path) -> None:
     shutil.rmtree(backup)
 
 
+def _prepare_sync_paths(destination: Path, staging: Path, backup: Path) -> None:
+    if not destination.exists() and backup.is_dir() and not backup.is_symlink():
+        os.replace(backup, destination)
+    if not destination.is_dir() or destination.is_symlink():
+        raise ModelDownloadError("sync destination must be an existing model directory")
+    if backup.exists():
+        raise ModelDownloadError("sync backup already exists; inspect or remove it")
+    if staging.is_symlink():
+        raise ModelDownloadError("sync staging path must not be a symbolic link")
+    if staging.exists() and not staging.is_dir():
+        raise ModelDownloadError("sync staging path must be a directory")
+    staging.mkdir(mode=0o700, exist_ok=True)
+    staging.chmod(0o700)
+
+
+def _candidate(root: Path, relative_path: str) -> tuple[Path, int] | None:
+    path = root / relative_path
+    if not path.is_file():
+        return None
+    return path, path.stat().st_size
+
+
+def _remove(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+async def _notify(callback: SyncProgress | None, event: dict[str, Any]) -> None:
+    if callback is not None:
+        await callback(event)
+
+
 async def sync_model(
     client: Any,
     model_id: str,
@@ -78,19 +110,12 @@ async def sync_model(
     progress: SyncProgress | None = None,
 ) -> SyncResult:
     """Synchronize a completed directory without relying on queue state."""
-    destination = destination.expanduser().resolve()
+    if progress is not None and not inspect.iscoroutinefunction(progress):
+        raise TypeError("progress must be an async callable")
+    destination = await asyncio.to_thread(lambda: destination.expanduser().resolve())
     staging = destination.with_name(f".{destination.name}.sync.partial")
     backup = destination.with_name(f".{destination.name}.sync.previous")
-    if not destination.exists() and backup.is_dir() and not backup.is_symlink():
-        await asyncio.to_thread(os.replace, backup, destination)
-    if not destination.is_dir() or destination.is_symlink():
-        raise ModelDownloadError("sync destination must be an existing model directory")
-    if backup.exists():
-        raise ModelDownloadError("sync backup already exists; inspect or remove it")
-    if staging.is_symlink():
-        raise ModelDownloadError("sync staging path must not be a symbolic link")
-    if staging.exists() and not staging.is_dir():
-        raise ModelDownloadError("sync staging path must be a directory")
+    await asyncio.to_thread(_prepare_sync_paths, destination, staging, backup)
     snapshot = await client.snapshot_model(model_id)
     if snapshot.sha256sums is None or any(item.sha256 is None for item in snapshot.files):
         raise ModelDownloadError("sync requires the remote SHA256SUMS inventory")
@@ -108,22 +133,21 @@ async def sync_model(
         local_checksums = {}
     manifests_match = local_manifest == remote_manifest
 
-    staging.mkdir(mode=0o700, exist_ok=True)
-    staging.chmod(0o700)
-    staged_files = await asyncio.to_thread(_files, staging)
     reused = downloaded = deleted = rehashed_files = 0
     expected_paths = set(remote_checksums)
     try:
         for item in snapshot.files:
-            target = _secure_parent(staging, item.relative_path)
-            staged = staged_files.get(item.relative_path)
-            local = local_files.get(item.relative_path)
+            target = await asyncio.to_thread(_secure_parent, staging, item.relative_path)
+            staged_entry = await asyncio.to_thread(_candidate, staging, item.relative_path)
+            local_entry = await asyncio.to_thread(_candidate, destination, item.relative_path)
+            staged = staged_entry[0] if staged_entry else None
+            local = local_entry[0] if local_entry else None
             reusable: Path | None = None
-            if staged is not None and staged.stat().st_size == item.size:
+            if staged_entry is not None and staged_entry[1] == item.size:
                 rehashed_files += 1
                 if await asyncio.to_thread(_file_sha256, staged) == item.sha256:
                     reusable = staged
-            if reusable is None and local is not None and local.stat().st_size == item.size:
+            if reusable is None and local_entry is not None and local_entry[1] == item.size:
                 if not rehash and (
                     manifests_match or local_checksums.get(item.relative_path) == item.sha256
                 ):
@@ -134,36 +158,35 @@ async def sync_model(
                         reusable = local
             if reusable is not None:
                 if reusable != target:
-                    target.unlink(missing_ok=True)
+                    await asyncio.to_thread(_remove, target)
                     await asyncio.to_thread(_link_or_copy, reusable, target)
                 reused += 1
-                if progress:
-                    progress({"event": "file_reused", "path": item.relative_path})
+                await _notify(progress, {"event": "file_reused", "path": item.relative_path})
                 continue
 
-            target.unlink(missing_ok=True)
+            await asyncio.to_thread(_remove, target)
             completed_chunks: set[int] = set()
 
             current_path, current_size = item.relative_path, item.size
 
-            def mark_complete(
+            async def mark_complete(
                 chunk: int,
                 completed_bytes: int,
                 bytes_per_second: int,
                 path: str = current_path,
                 total: int = current_size,
             ) -> None:
-                if progress:
-                    progress(
-                        {
-                            "event": "chunk_complete",
-                            "path": path,
-                            "chunk": chunk,
-                            "completed_bytes": completed_bytes,
-                            "total_bytes": total,
-                            "bytes_per_second": bytes_per_second,
-                        }
-                    )
+                await _notify(
+                    progress,
+                    {
+                        "event": "chunk_complete",
+                        "path": path,
+                        "chunk": chunk,
+                        "completed_bytes": completed_bytes,
+                        "total_bytes": total,
+                        "bytes_per_second": bytes_per_second,
+                    },
+                )
 
             await pull_file_with_state(
                 client._client,
@@ -183,8 +206,7 @@ async def sync_model(
                 verify_checksum=True,
             )
             downloaded += 1
-            if progress:
-                progress({"event": "file_downloaded", "path": item.relative_path})
+            await _notify(progress, {"event": "file_downloaded", "path": item.relative_path})
 
         metadata = {"SHA256SUMS", "SHA256SUMS.sigstore.json"}
         extras = set(local_files) - expected_paths - metadata
@@ -195,7 +217,7 @@ async def sync_model(
                 await asyncio.to_thread(
                     _link_or_copy,
                     local_files[relative],
-                    _secure_parent(staging, relative),
+                    await asyncio.to_thread(_secure_parent, staging, relative),
                 )
 
         await asyncio.to_thread(_write_bytes, staging / "SHA256SUMS", remote_manifest)
@@ -230,7 +252,7 @@ async def sync_model(
             desired.update(extras)
         for relative, path in (await asyncio.to_thread(_files, staging)).items():
             if relative not in desired:
-                path.unlink()
+                await asyncio.to_thread(_remove, path)
         await asyncio.to_thread(_replace_directory, staging, destination, backup)
     except BaseException:
         raise

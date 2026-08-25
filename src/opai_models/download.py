@@ -12,18 +12,29 @@ import re
 import secrets
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
+from opai_models.client import ModelAccess, ModelDownloadError, _AsyncLicenseTransport
 
 _CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
-ProgressCallback = Callable[[dict[str, Any]], None]
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 CancelCallback = Callable[[], bool]
-ErrorCallback = Callable[[dict[str, Any]], None]
+ErrorCallback = Callable[[dict[str, Any]], Awaitable[None]]
+ChunkCompleteCallback = Callable[[int, int, int], Awaitable[None]]
+
+
+async def _blocking(function: Callable[..., Any], /, *args: Any) -> Any:
+    """Finish an in-flight filesystem syscall before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
 
 
 class DownloadCancelled(ModelDownloadError):
@@ -68,7 +79,7 @@ def _permanent_os_error(error: OSError) -> bool:
 
 
 class AccessProvider:
-    def __init__(self, client: LicenseClient, model_id: str, object_path: str) -> None:
+    def __init__(self, client: _AsyncLicenseTransport, model_id: str, object_path: str) -> None:
         self.client = client
         self.model_id = model_id
         self.object_path = object_path
@@ -169,7 +180,7 @@ async def _download_range(
                         raise DownloadCancelled("download cancelled")
                     if len(block) > remaining:
                         raise PermanentDownloadError("range response exceeded expected length")
-                    os.pwrite(descriptor, block, position)
+                    await _blocking(_write_block, descriptor, block, position)
                     position += len(block)
                     remaining -= len(block)
                 if remaining:
@@ -177,7 +188,7 @@ async def _download_range(
                 return expected_length
         except PermanentDownloadError as error:
             if on_error:
-                on_error(
+                await on_error(
                     {
                         "chunk": chunk_index,
                         "attempt": attempt + 1,
@@ -200,7 +211,7 @@ async def _download_range(
             if _permanent_os_error(caught):
                 error = PermanentDownloadError(type(caught).__name__)
                 if on_error:
-                    on_error(
+                    await on_error(
                         {
                             "chunk": chunk_index,
                             "attempt": attempt + 1,
@@ -217,7 +228,7 @@ async def _download_range(
             error = RetryableDownloadError(type(caught).__name__)
         delay = _backoff_delay(attempt, initial_backoff, max_backoff, retry_after)
         if on_error:
-            on_error(
+            await on_error(
                 {
                     "chunk": chunk_index,
                     "attempt": attempt + 1,
@@ -255,8 +266,36 @@ def _hash_file(path: Path) -> bytes:
     return digest.digest()
 
 
+def _prepare_partial(path: Path, size: int) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.ftruncate(descriptor, size)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _write_block(descriptor: int, block: bytes, position: int) -> None:
+    os.pwrite(descriptor, block, position)
+
+
+def _sync_file(descriptor: int) -> None:
+    os.fsync(descriptor)
+
+
+def _close_file(descriptor: int) -> None:
+    os.close(descriptor)
+
+
+def _file_size(path: Path) -> int:
+    return path.stat().st_size
+
+
 async def pull_file_with_state(
-    client: LicenseClient,
+    client: _AsyncLicenseTransport,
     model_id: str,
     object_path: str,
     partial: Path,
@@ -265,7 +304,7 @@ async def pull_file_with_state(
     expected_size: int,
     expected_sha256: str | None,
     completed_chunks: set[int],
-    mark_complete: Callable[[int, int, int], None],
+    mark_complete: ChunkCompleteCallback,
     chunk_size: int = 64 * 1024 * 1024,
     workers: int = 4,
     request_retries: int = 8,
@@ -290,13 +329,10 @@ async def pull_file_with_state(
     chunks = _ranges(expected_size, chunk_size)
     if not completed_chunks <= {chunk[0] for chunk in chunks}:
         raise ModelDownloadError("invalid persisted chunk state")
-    partial.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(partial, os.O_RDWR | os.O_CREAT, 0o600)
-    os.fchmod(descriptor, 0o600)
+    descriptor = await _blocking(_prepare_partial, partial, expected_size)
     lock = asyncio.Lock()
     semaphore = asyncio.Semaphore(workers)
     started = time.monotonic()
-    os.ftruncate(descriptor, expected_size)
 
     async def transfer(index: int, start: int, end: int) -> None:
         async with semaphore:
@@ -314,24 +350,24 @@ async def pull_file_with_state(
                 on_error=on_error,
             )
             async with lock:
-                os.fsync(descriptor)
+                await _blocking(_sync_file, descriptor)
                 completed_chunks.add(index)
                 completed_bytes = sum(chunks[i][2] - chunks[i][1] + 1 for i in completed_chunks)
                 elapsed = max(time.monotonic() - started, 0.001)
-                mark_complete(index, completed_bytes, int(completed_bytes / elapsed))
+                await mark_complete(index, completed_bytes, int(completed_bytes / elapsed))
 
     try:
         await asyncio.gather(
             *(transfer(*chunk) for chunk in chunks if chunk[0] not in completed_chunks)
         )
-        os.fsync(descriptor)
+        await _blocking(_sync_file, descriptor)
     finally:
-        os.close(descriptor)
-    if partial.stat().st_size != expected_size:
+        await _blocking(_close_file, descriptor)
+    if await _blocking(_file_size, partial) != expected_size:
         raise ModelDownloadError("final size verification failed")
     if verify_checksum:
         if supplied is None:
             raise ModelDownloadError("invalid expected model checksum")
-        if await asyncio.to_thread(_hash_file, partial) != supplied:
+        if await _blocking(_hash_file, partial) != supplied:
             raise ChecksumMismatchError("final SHA-256 verification failed")
     return partial

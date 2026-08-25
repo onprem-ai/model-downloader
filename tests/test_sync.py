@@ -1,9 +1,11 @@
 import errno
 import hashlib
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from conftest import license_key
 
 from opai_models.async_client import AsyncModelClient
 from opai_models.client import ModelDownloadError
@@ -48,7 +50,7 @@ def write_model(directory: Path, contents: dict[str, bytes], manifest: bytes | N
 
 
 def client_for(snap: ModelSnapshot) -> AsyncModelClient:
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
     client.snapshot_model = AsyncMock(return_value=snap)
     return client
 
@@ -220,7 +222,7 @@ async def test_sync_progress_and_signature_verification(tmp_path: Path) -> None:
     (destination / "SHA256SUMS.sigstore.json").write_bytes(b"old-bundle")
     client = AsyncModelClient(
         "https://license.example",
-        lambda: "license",
+        license_key,
         sigstore_identity="trusted@example.com",
         sigstore_issuer="https://issuer.example",
     )
@@ -229,8 +231,12 @@ async def test_sync_progress_and_signature_verification(tmp_path: Path) -> None:
     raw.read_small = AsyncMock(return_value=b"new-bundle")
     client._client = raw
     events = []
+
+    async def progress(event) -> None:
+        events.append(event)
+
     with patch("opai_models.sync.verify_sigstore_bundle") as verify:
-        result = await sync_model(client, "example", destination, progress=events.append)
+        result = await sync_model(client, "example", destination, progress=progress)
     assert result.reused_files == 2
     assert [event["event"] for event in events] == ["file_reused", "file_reused"]
     verify.assert_called_once_with(
@@ -240,6 +246,34 @@ async def test_sync_progress_and_signature_verification(tmp_path: Path) -> None:
         offline=False,
     )
     assert (destination / "SHA256SUMS.sigstore.json").read_bytes() == b"new-bundle"
+
+
+@pytest.mark.asyncio
+async def test_sync_rejects_synchronous_progress_callback(tmp_path: Path) -> None:
+    contents = {".source.json": b"source", "file": b"payload"}
+    snap = snapshot(contents)
+    destination = tmp_path / "example"
+    write_model(destination, contents, snap.sha256sums.encode())
+    client = client_for(snap)
+    with pytest.raises(TypeError, match="progress must be an async callable"):
+        await sync_model(client, "example", destination, progress=lambda event: None)
+
+
+@pytest.mark.asyncio
+async def test_sync_accepts_async_progress_callback(tmp_path: Path) -> None:
+    contents = {".source.json": b"source", "file": b"payload"}
+    snap = snapshot(contents)
+    destination = tmp_path / "example"
+    write_model(destination, contents, snap.sha256sums.encode())
+    client = client_for(snap)
+    event_loop_thread = threading.get_ident()
+    seen = []
+
+    async def progress(event) -> None:
+        seen.append((event["event"], threading.get_ident()))
+
+    await sync_model(client, "example", destination, progress=progress)
+    assert seen == [("file_reused", event_loop_thread), ("file_reused", event_loop_thread)]
 
 
 @pytest.mark.asyncio

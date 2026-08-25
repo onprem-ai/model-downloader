@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-LicenseKeyProvider = Callable[[], str | Awaitable[str]]
+AsyncLicenseProvider = Callable[[], Awaitable[str]]
 
 
 class ModelDownloadError(RuntimeError):
@@ -35,13 +35,13 @@ class ModelAccess:
     version_id: str | None = None
 
 
-class LicenseClient:
-    """Native async client backed by one reusable HTTPX connection pool."""
+class _AsyncLicenseTransport:
+    """Internal native-async License Server transport."""
 
     def __init__(
         self,
         api_url: str,
-        license_provider: LicenseKeyProvider,
+        license_provider: AsyncLicenseProvider,
         timeout: float = 30,
         *,
         http_client: httpx.AsyncClient | None = None,
@@ -58,8 +58,8 @@ class LicenseClient:
             raise ModelDownloadError(
                 "API URL must be HTTPS (HTTP is allowed only for loopback tests)"
             )
-        if not callable(license_provider):
-            raise TypeError("license_provider must be callable")
+        if not inspect.iscoroutinefunction(license_provider):
+            raise TypeError("license_provider must be an async callable")
         self.api_url = api_url.rstrip("/")
         self.license_provider = license_provider
         self.timeout = timeout
@@ -74,15 +74,14 @@ class LicenseClient:
         if self._owns_http_client:
             await self.http.aclose()
 
-    async def __aenter__(self) -> LicenseClient:
+    async def __aenter__(self) -> _AsyncLicenseTransport:
         return self
 
     async def __aexit__(self, *args: object) -> None:
         await self.aclose()
 
     async def _license_key(self) -> str:
-        supplied = self.license_provider()
-        key = await supplied if inspect.isawaitable(supplied) else supplied
+        key = await self.license_provider()
         if not isinstance(key, str) or not key:
             raise ModelDownloadError("license key must not be empty")
         return key

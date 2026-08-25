@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 from pathlib import Path
@@ -5,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
+from opai_models.client import ModelAccess, ModelDownloadError, _AsyncLicenseTransport
 from opai_models.download import DownloadCancelled, pull_file_with_state
 
 
@@ -24,7 +25,7 @@ def access(content: bytes, *, source: str = "source", checksum: str | None = Non
 @pytest.mark.asyncio
 async def test_external_state_download_records_only_durable_chunks(tmp_path: Path) -> None:
     content = b"abcdef"
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     client.access = AsyncMock(return_value=access(content))
     completed = {0}
     events = []
@@ -34,6 +35,9 @@ async def test_external_state_download_records_only_durable_chunks(tmp_path: Pat
     async def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
         os.pwrite(descriptor, content[start : end + 1], start)
         return end - start + 1
+
+    async def mark_complete(index: int, size: int, rate: int) -> None:
+        events.append((index, size, rate))
 
     with patch("opai_models.download._download_range", side_effect=ranged) as transfer:
         result = await pull_file_with_state(
@@ -45,7 +49,7 @@ async def test_external_state_download_records_only_durable_chunks(tmp_path: Pat
             expected_size=6,
             expected_sha256=hashlib.sha256(content).hexdigest(),
             completed_chunks=completed,
-            mark_complete=lambda index, size, rate: events.append((index, size, rate)),
+            mark_complete=mark_complete,
             chunk_size=3,
             workers=1,
         )
@@ -68,8 +72,12 @@ async def test_external_state_download_records_only_durable_chunks(tmp_path: Pat
 async def test_external_state_rejects_changed_source(tmp_path: Path, change, message: str) -> None:
     content = b"abcdef"
     current = access(content)
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     client.access = AsyncMock(return_value=ModelAccess(**{**current.__dict__, **change}))
+
+    async def mark_complete(*_args) -> None:
+        return None
+
     with pytest.raises(ModelDownloadError, match=message):
         await pull_file_with_state(
             client,
@@ -80,7 +88,7 @@ async def test_external_state_rejects_changed_source(tmp_path: Path, change, mes
             expected_size=current.size,
             expected_sha256=hashlib.sha256(content).hexdigest(),
             completed_chunks=set(),
-            mark_complete=lambda *_: None,
+            mark_complete=mark_complete,
             chunk_size=3,
         )
 
@@ -88,13 +96,17 @@ async def test_external_state_rejects_changed_source(tmp_path: Path, change, mes
 @pytest.mark.asyncio
 async def test_external_state_rejects_invalid_chunks_and_final_hash(tmp_path: Path) -> None:
     content = b"abcdef"
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     client.access = AsyncMock(return_value=access(content))
+
+    async def mark_complete(*_args) -> None:
+        return None
+
     arguments = dict(
         expected_source_id="source",
         expected_size=6,
         expected_sha256=hashlib.sha256(content).hexdigest(),
-        mark_complete=lambda *_: None,
+        mark_complete=mark_complete,
         chunk_size=3,
     )
     with pytest.raises(ModelDownloadError, match="chunk state"):
@@ -118,13 +130,16 @@ async def test_external_state_rejects_invalid_chunks_and_final_hash(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_external_state_accepts_missing_provider_checksum(tmp_path: Path) -> None:
     content = b"abcdef"
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     current = access(content)
     client.access = AsyncMock(return_value=ModelAccess(**{**current.__dict__, "checksums": {}}))
 
     async def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
         os.pwrite(descriptor, content[start : end + 1], start)
         return end - start + 1
+
+    async def mark_complete(*_args) -> None:
+        return None
 
     with patch("opai_models.download._download_range", side_effect=ranged):
         result = await pull_file_with_state(
@@ -136,17 +151,53 @@ async def test_external_state_accepts_missing_provider_checksum(tmp_path: Path) 
             expected_size=6,
             expected_sha256=hashlib.sha256(content).hexdigest(),
             completed_chunks=set(),
-            mark_complete=lambda *_: None,
+            mark_complete=mark_complete,
             chunk_size=3,
         )
     assert result.read_bytes() == content
 
 
 @pytest.mark.asyncio
+async def test_external_state_supports_async_callbacks(tmp_path: Path) -> None:
+    content = b"abcdef"
+    client = MagicMock(spec=_AsyncLicenseTransport)
+    client.access = AsyncMock(return_value=access(content))
+    events = []
+
+    async def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
+        await asyncio.to_thread(os.pwrite, descriptor, content[start : end + 1], start)
+        return end - start + 1
+
+    async def mark_complete(index: int, size: int, rate: int) -> None:
+        await asyncio.sleep(0)
+        events.append((index, size, rate))
+
+    with patch("opai_models.download._download_range", side_effect=ranged):
+        await pull_file_with_state(
+            client,
+            "example",
+            "file",
+            tmp_path / "file",
+            expected_source_id="source",
+            expected_size=6,
+            expected_sha256=hashlib.sha256(content).hexdigest(),
+            completed_chunks=set(),
+            mark_complete=mark_complete,
+            chunk_size=3,
+        )
+    assert {event[0] for event in events} == {0, 1}
+    assert sorted(event[1] for event in events) == [3, 6]
+
+
+@pytest.mark.asyncio
 async def test_external_state_propagates_cancellation(tmp_path: Path) -> None:
     content = b"abcdef"
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     client.access = AsyncMock(return_value=access(content))
+
+    async def mark_complete(*_args) -> None:
+        return None
+
     with pytest.raises(DownloadCancelled):
         await pull_file_with_state(
             client,
@@ -157,7 +208,7 @@ async def test_external_state_propagates_cancellation(tmp_path: Path) -> None:
             expected_size=6,
             expected_sha256=hashlib.sha256(content).hexdigest(),
             completed_chunks=set(),
-            mark_complete=lambda *_: None,
+            mark_complete=mark_complete,
             chunk_size=3,
             should_cancel=lambda: True,
         )

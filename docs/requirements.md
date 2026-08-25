@@ -98,16 +98,23 @@ await manager.wait(job_id)
 
 Rules:
 
+- The public package API exposes `AsyncModelClient` and `DownloadManager`; the
+  lower-level HTTP transport and synchronous SQLite implementation are internal.
 - Methods return immutable typed records or plain serializable values; they must
   not depend on FastAPI/Pydantic response types.
 - Blocking filesystem and SQLite work must not block the caller's event loop.
 - One long-lived client should be reusable across requests and downloads.
-- The license is supplied by a callback for each authenticated API request and
-  kept only in memory. The callback may return a string directly or an awaitable
-  string, enabling local environment lookups and async secret providers without
-  blocking the event loop. It must never be stored in queue rows or metadata files.
+- The license is supplied by an async callback for each authenticated API
+  request, awaited on the event loop, and kept only in memory. It must never be
+  stored in queue rows or metadata files.
 - License Server and direct-download HTTP requests use a shared native-async
   HTTPX client and connection pool; network I/O must not use worker threads.
+- Public progress callbacks are async-only and awaited on the event loop. Each
+  callback completes before the corresponding operation continues. Callers must
+  explicitly offload any blocking callback work.
+- Potentially blocking filesystem calls, SQLite operations, hashing, and
+  signature verification run outside the event loop. Durable chunk progress is
+  recorded only after the range write and `fsync` complete.
 
 ## 5. CLI behavior
 
@@ -419,9 +426,12 @@ class AppState(TypedDict):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[AppState]:
+    async def license_provider() -> str:
+        return os.environ["OPAI_LICENSE_KEY"]
+
     client = AsyncModelClient(
         api_url="https://license.api.onprem.ai",
-        license_provider=lambda: os.environ["OPAI_LICENSE_KEY"],
+        license_provider=license_provider,
         sigstore_identity=os.environ["OPAI_SIGSTORE_IDENTITY"],
         sigstore_issuer=os.environ["OPAI_SIGSTORE_ISSUER"],
     )

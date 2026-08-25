@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import secrets
@@ -14,10 +15,14 @@ from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from opai_models.async_client import AsyncModelClient
-from opai_models.client import LicenseClient, ModelDownloadError, TransientModelDownloadError
+from opai_models.client import (
+    ModelDownloadError,
+    TransientModelDownloadError,
+    _AsyncLicenseTransport,
+)
 from opai_models.download import (
     ChecksumMismatchError,
     DownloadCancelled,
@@ -123,45 +128,6 @@ class DownloadError:
     http_status: int | None
     request_attempt: int | None
     backoff_seconds: float | None
-
-
-class QueueStore(Protocol):
-    def enqueue(self, model_id: str, destination: str) -> DownloadJob: ...
-    def get(self, job_id: str) -> DownloadJob: ...
-    def list(self, *, limit: int = 100, state: JobState | None = None) -> list[DownloadJob]: ...
-    def claim(self, worker_id: str, lease_seconds: int) -> tuple[DownloadJob, str] | None: ...
-    def heartbeat(self, job_id: str, token: str, lease_seconds: int) -> bool: ...
-    def save_snapshot(self, job_id: str, token: str, snapshot: ModelSnapshot) -> bool: ...
-    def files(self, job_id: str) -> list[DownloadFile]: ...
-    def source(self, job_id: str) -> SourceDocument: ...
-    def prepare_chunks(self, file_id: str, token: str, size: int, chunk_size: int) -> bool: ...
-    def completed_chunks(self, file_id: str) -> set[int]: ...
-    def record_progress(self, file_id: str, token: str, event: dict[str, Any]) -> bool: ...
-    def record_error(self, file_id: str, token: str, event: dict[str, Any]) -> bool: ...
-    def record_job_error(self, job_id: str, token: str, event: dict[str, Any]) -> bool: ...
-    def errors(self, job_id: str) -> list[DownloadError]: ...
-    def schedule_retry(
-        self, job_id: str, token: str, *, delay: float, error_code: str, error_message: str
-    ) -> bool: ...
-    def release(self, job_id: str, token: str) -> bool: ...
-    def reset_file(self, file_id: str, token: str, *, integrity_failure: bool = False) -> bool: ...
-    def file(self, file_id: str) -> DownloadFile: ...
-    def update_file(
-        self,
-        file_id: str,
-        token: str,
-        *,
-        completed_bytes: int,
-        state: FileState,
-        sha256: str | None = None,
-        error_code: str | None = None,
-        error_message: str | None = None,
-    ) -> bool: ...
-    def mark_verifying(self, job_id: str, token: str) -> bool: ...
-    def finish(self, job_id: str, token: str, state: JobState, **fields: Any) -> bool: ...
-    def request_cancel(self, job_id: str) -> DownloadJob: ...
-    def retry(self, job_id: str) -> DownloadJob: ...
-    def cancellation_requested(self, job_id: str, token: str) -> bool: ...
 
 
 def _now() -> datetime:
@@ -955,7 +921,6 @@ class DownloadManager:
         max_backoff: float = 60.0,
         no_progress_timeout: float = 3600.0,
         overall_timeout: float = 0.0,
-        store: QueueStore | None = None,
     ) -> None:
         if max_concurrent_downloads < 1:
             raise ValueError("max_concurrent_downloads must be positive")
@@ -991,7 +956,7 @@ class DownloadManager:
         self.max_backoff = max_backoff
         self.no_progress_timeout = no_progress_timeout
         self.overall_timeout = overall_timeout
-        self.store = store or SQLiteQueueStore(Path(database_path))
+        self.store = SQLiteQueueStore(Path(database_path))
         self.worker_id = f"worker-{uuid.uuid4().hex}"
         self._stop, self._wake = asyncio.Event(), asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
@@ -1038,7 +1003,7 @@ class DownloadManager:
         model_id: str,
         destination: str | Path | None = None,
     ) -> DownloadJob:
-        model = LicenseClient._model_id(model_id)
+        model = _AsyncLicenseTransport._model_id(model_id)
         job = await asyncio.to_thread(
             self.store.enqueue, model, str(self._destination(model, destination))
         )
@@ -1071,15 +1036,15 @@ class DownloadManager:
         job_id: str,
         *,
         poll_interval: float = 0.25,
-        on_update: Callable[[DownloadJob], Awaitable[None] | None] | None = None,
+        on_update: Callable[[DownloadJob], Awaitable[None]] | None = None,
     ) -> DownloadJob:
+        if on_update is not None and not inspect.iscoroutinefunction(on_update):
+            raise TypeError("on_update must be an async callable")
         previous: DownloadJob | None = None
         while True:
             job = await self.get(job_id)
             if on_update is not None and job != previous:
-                result = on_update(job)
-                if result is not None:
-                    await result
+                await on_update(job)
             if job.state in _TERMINAL:
                 return job
             previous = job

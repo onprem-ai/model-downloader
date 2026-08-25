@@ -1,7 +1,10 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+import threading
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from conftest import license_key
 
 from opai_models.async_client import AsyncModelClient
 from opai_models.client import ModelAccess, ModelDownloadError
@@ -9,18 +12,18 @@ from opai_models.client import ModelAccess, ModelDownloadError
 
 def test_signature_verification_requires_complete_trust_policy() -> None:
     with pytest.raises(ValueError, match="sigstore_identity and sigstore_issuer"):
-        AsyncModelClient("https://license.example", lambda: "license")
+        AsyncModelClient("https://license.example", license_key)
     with pytest.raises(ValueError, match="sigstore_identity and sigstore_issuer"):
         AsyncModelClient(
             "https://license.example",
-            lambda: "license",
+            license_key,
             sigstore_identity="identity",
         )
 
 
 @pytest.mark.asyncio
 async def test_async_client_reuses_configuration_and_fetches_credentials_per_operation() -> None:
-    credentials = MagicMock(return_value="license")
+    credentials = AsyncMock(return_value="license")
     requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -49,19 +52,44 @@ async def test_async_client_reuses_configuration_and_fetches_credentials_per_ope
         assert await client.get_model_file("a", "file") == ModelAccess(
             "file", "https://s3.example/a", 1, "source", "later", {}, {}
         )
-    assert credentials.call_count == 2
+    assert credentials.await_count == 2
     assert all(request.headers["Authorization"] == "Bearer license" for request in requests)
 
 
 @pytest.mark.asyncio
+async def test_license_provider_runs_on_event_loop() -> None:
+    event_loop_thread = threading.get_ident()
+    provider_thread = None
+
+    async def credentials() -> str:
+        nonlocal provider_thread
+        await asyncio.sleep(0)
+        provider_thread = threading.get_ident()
+        return "license"
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"models": [], "next_cursor": None})
+    )
+    client = AsyncModelClient("https://license.example", credentials, verify_signatures=False)
+    await client._client.http.aclose()
+    client._client.http = httpx.AsyncClient(transport=transport)
+    await client.list_models()
+    await client.aclose()
+    assert provider_thread == event_loop_thread
+
+
+@pytest.mark.asyncio
 async def test_async_source_and_snapshot_delegate_without_persisting_credentials() -> None:
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
     source = (
         b'{"schema_version":1,"source":{"provider":"huggingface",'
         b'"repository":"a/b","revision":null}}'
     )
     with (
-        patch("opai_models.async_client.LicenseClient.read_small", AsyncMock(return_value=source)),
+        patch(
+            "opai_models.async_client._AsyncLicenseTransport.read_small",
+            AsyncMock(return_value=source),
+        ),
         patch(
             "opai_models.async_client.snapshot_model", AsyncMock(return_value="snapshot")
         ) as snapshot,
@@ -80,9 +108,9 @@ async def test_async_source_and_snapshot_delegate_without_persisting_credentials
 
 @pytest.mark.asyncio
 async def test_async_source_rejects_invalid_json() -> None:
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
     with patch(
-        "opai_models.async_client.LicenseClient.read_small",
+        "opai_models.async_client._AsyncLicenseTransport.read_small",
         AsyncMock(return_value=b"secret-invalid"),
     ):
         with pytest.raises(ModelDownloadError, match="invalid .source.json") as caught:

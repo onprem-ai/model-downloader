@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from conftest import license_key
 
 from opai_models.async_client import AsyncModelClient, _completed_directory_matches
 from opai_models.manager import SQLiteQueueStore
@@ -116,12 +117,12 @@ async def test_pull_model_stages_verifies_and_atomically_publishes(tmp_path: Pat
     token = claimed[1]
     assert store.save_snapshot(job.id, token, snap)
 
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
 
     async def pull_file(client, model_id, path, destination, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents[path])
-        kwargs["mark_complete"](0, destination.stat().st_size, 123)
+        await kwargs["mark_complete"](0, destination.stat().st_size, 123)
         return destination
 
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -159,7 +160,7 @@ async def test_pull_model_without_verification_uses_inventory_without_manifest(
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
     client = AsyncModelClient(
         "https://license.example",
-        lambda: "license",
+        license_key,
         verify_checksums=False,
         verify_signatures=False,
     )
@@ -167,7 +168,7 @@ async def test_pull_model_without_verification_uses_inventory_without_manifest(
     async def pull_file(client, model_id, path, destination, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents[path])
-        kwargs["mark_complete"](0, destination.stat().st_size, 123)
+        await kwargs["mark_complete"](0, destination.stat().st_size, 123)
         assert kwargs["expected_sha256"] is None
         assert kwargs["verify_checksum"] is False
         return destination
@@ -189,7 +190,7 @@ async def test_pull_model_rejects_checksum_and_preserves_staging(tmp_path: Path)
     job = store.enqueue(snap.model_id, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
 
     async def corrupt(client, model_id, path, destination, **kwargs):
         relative = path
@@ -218,7 +219,7 @@ async def test_pull_model_rejects_checksum_and_preserves_staging(tmp_path: Path)
 async def test_pull_model_rejects_unrelated_existing_destination(tmp_path: Path) -> None:
     destination = tmp_path / "final"
     destination.mkdir()
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
     store = MagicMock()
     store.get.return_value = MagicMock(snapshot_sha256="sha256:" + "a" * 64)
     store.files.return_value = []
@@ -236,7 +237,7 @@ async def test_pull_model_rejects_symlink_staging_path(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (tmp_path / f".final.{job.id}.partial").symlink_to(outside, target_is_directory=True)
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
     with pytest.raises(Exception, match="symbolic link"):
         await client._pull_job(job.id, tmp_path / "final", store, claimed[1])
 
@@ -253,7 +254,7 @@ async def test_pull_model_rejects_staging_file_symlink(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.write_text("untouched")
     (staging / ".source.json").symlink_to(outside)
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
     with pytest.raises(Exception, match="staging file"):
         await client._pull_job(job.id, tmp_path / "final", store, claimed[1])
     assert outside.read_text() == "untouched"
@@ -271,7 +272,7 @@ async def test_pull_model_rejects_nested_staging_symlink(tmp_path: Path) -> None
     outside = tmp_path / "outside"
     outside.mkdir()
     (staging / "nested").symlink_to(outside, target_is_directory=True)
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
 
     async def pull_source(client, model_id, path, destination, **kwargs):
         destination.write_bytes(contents[path])
@@ -301,10 +302,10 @@ async def test_pull_model_rejects_lost_lease_before_publish(tmp_path: Path) -> N
     async def pull_file(client, model_id, path, destination, **kwargs):
         data = contents[path]
         destination.write_bytes(data)
-        kwargs["mark_complete"](0, len(data), 1)
+        await kwargs["mark_complete"](0, len(data), 1)
         return destination
 
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
     original = store.cancellation_requested
     checks = iter([True])
     store.cancellation_requested = lambda *args: next(checks, original(*args))
@@ -330,7 +331,7 @@ async def test_pull_model_recovers_after_rename_before_queue_finish(tmp_path: Pa
     (destination / "file").write_bytes(b"correct")
     (destination / "SHA256SUMS").write_text(snap.sha256sums)
     (destination / ".source.json").write_bytes(contents[".source.json"])
-    client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
+    client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
     assert await client._pull_job(job.id, destination, store, claimed[1]) == destination
     assert all(item.state == "completed" for item in store.files(job.id))
 

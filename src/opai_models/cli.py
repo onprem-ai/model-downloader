@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from opai_models.async_client import AsyncModelClient
-from opai_models.client import LicenseClient, ModelDownloadError
+from opai_models.client import ModelDownloadError, _AsyncLicenseTransport
 from opai_models.manager import DownloadManager
 
 DEFAULT_API_URL = "https://license.api.onprem.ai"
@@ -39,7 +39,7 @@ def _human_size(value: int) -> str:
     raise AssertionError("unreachable")
 
 
-def _progress(value: dict[str, Any]) -> None:
+async def _progress(value: dict[str, Any]) -> None:
     if value["event"] == "chunk_complete":
         completed = int(value["completed_bytes"])
         total = int(value["total_bytes"])
@@ -220,7 +220,7 @@ async def _pull(args: argparse.Namespace, license_provider) -> int:
         queued = await manager.enqueue(args.model_id, args.destination)
         await manager.start()
 
-        def show(job) -> None:
+        async def show(job) -> None:
             if args.json:
                 print(
                     json.dumps({"event": "progress", "job": job.to_dict()}, separators=(",", ":"))
@@ -264,13 +264,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("limit must be 1..1000")
     try:
         key = _license_key(args.license_env, prompt=not args.no_prompt)
+
+        async def license_provider() -> str:
+            return key
+
         if args.command == "pull":
-            return asyncio.run(_pull(args, lambda: key))
+            return asyncio.run(_pull(args, license_provider))
         if args.command == "sync":
-            return asyncio.run(_sync(args, lambda: key))
+            return asyncio.run(_sync(args, license_provider))
 
         async def query() -> dict[str, Any]:
-            async with LicenseClient(args.api_url, lambda: key) as client:
+            async with _AsyncLicenseTransport(args.api_url, license_provider) as client:
                 if args.command == "list":
                     return await client.list_models(limit=args.limit)
                 access = await client.access(args.model_id, args.relative_path)

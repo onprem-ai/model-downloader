@@ -36,11 +36,14 @@ def required_environment(name: str) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[AppState]:
-    # The callback supplies the credential only when making an API request. The
-    # manager never stores it in SQLite.
+    # The async callback supplies the credential only when making an API request.
+    # The manager never stores it in SQLite.
+    async def license_provider() -> str:
+        return required_environment("OPAI_LICENSE_KEY")
+
     client = AsyncModelClient(
         "https://license.api.onprem.ai",
-        license_provider=lambda: required_environment("OPAI_LICENSE_KEY"),
+        license_provider=license_provider,
         sigstore_identity=required_environment("OPAI_SIGSTORE_IDENTITY"),
         sigstore_issuer=required_environment("OPAI_SIGSTORE_ISSUER"),
     )

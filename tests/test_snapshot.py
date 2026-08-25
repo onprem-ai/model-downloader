@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
+from opai_models.client import ModelAccess, ModelDownloadError, _AsyncLicenseTransport
 from opai_models.metadata import SourceDocument, render_sha256sums
 from opai_models.snapshot import ModelFile, ModelSnapshot, _sha256, snapshot_model
 
@@ -82,7 +82,7 @@ async def test_snapshot_checksum_normalization_and_empty_inventory() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_recurses_and_uses_authoritative_metadata() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     pages = listing()
     client.list_all.side_effect = pages
     sums = render_sha256sums(
@@ -116,7 +116,7 @@ async def test_snapshot_recurses_and_uses_authoritative_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_requires_trusted_identity_when_signature_exists() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     pages = listing()
     pages[0]["objects"].append({"key": "SHA256SUMS.sigstore.json", "size": 8})
     client.list_all.side_effect = pages
@@ -136,7 +136,7 @@ async def test_snapshot_requires_trusted_identity_when_signature_exists() -> Non
 
 @pytest.mark.asyncio
 async def test_snapshot_enforces_signature_by_default_and_passes_exact_manifest() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     pages = listing()
     pages[0]["objects"].append({"key": "SHA256SUMS.sigstore.json", "size": 8})
     client.list_all.side_effect = pages
@@ -174,7 +174,7 @@ async def test_snapshot_enforces_signature_by_default_and_passes_exact_manifest(
 
 @pytest.mark.asyncio
 async def test_checksum_verification_can_be_skipped_independently() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     client.list_all.return_value = {
         "objects": [
             {"key": ".source.json", "size": len(source_bytes())},
@@ -200,7 +200,7 @@ async def test_checksum_verification_can_be_skipped_independently() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_without_verification_uses_authenticated_listing() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     source = source_bytes()
     client.list_all.return_value = {
         "objects": [
@@ -227,7 +227,7 @@ async def test_snapshot_without_verification_uses_authenticated_listing() -> Non
 
 @pytest.mark.asyncio
 async def test_snapshot_requires_metadata_and_exact_inventory() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     client.list_all.return_value = {"objects": [], "prefixes": []}
     with pytest.raises(ModelDownloadError, match="SHA256SUMS"):
         await snapshot_model(client, "example", verify_signatures=False)
@@ -243,7 +243,7 @@ async def test_snapshot_requires_metadata_and_exact_inventory() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_rejects_changed_listing_and_provider_checksum() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     client.list_all.return_value = {
         "objects": [
             {"key": "file", "size": 4},
@@ -301,7 +301,7 @@ async def test_snapshot_rejects_changed_listing_and_provider_checksum() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_rejects_root_and_duplicate_objects() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     with pytest.raises(ModelDownloadError, match="model ID"):
         await snapshot_model(client, "bad/id")
     client.list_all.return_value = {
@@ -317,7 +317,7 @@ async def test_snapshot_rejects_root_and_duplicate_objects() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_rejects_outside_child_prefix_and_object() -> None:
-    client = MagicMock(spec=LicenseClient)
+    client = MagicMock(spec=_AsyncLicenseTransport)
     client.list_all.return_value = {"objects": [], "prefixes": ["../other/"]}
     with pytest.raises(ModelDownloadError, match="model-relative path"):
         await snapshot_model(client, "example", verify_signatures=False)

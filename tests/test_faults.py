@@ -5,9 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from conftest import secret_key
 
 from opai_models.cli import _human_size, _license_key, _progress, main
-from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
+from opai_models.client import ModelAccess, ModelDownloadError, _AsyncLicenseTransport
 from opai_models.download import (
     AccessProvider,
     PermanentDownloadError,
@@ -35,8 +36,8 @@ def model_access(
     )
 
 
-def async_client(handler, key=lambda: "secret") -> LicenseClient:
-    return LicenseClient(
+def async_client(handler, key=secret_key) -> _AsyncLicenseTransport:
+    return _AsyncLicenseTransport(
         "https://example.com",
         key,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
@@ -51,15 +52,18 @@ def test_client_rejects_unsafe_urls_and_provider() -> None:
         "missing-scheme.example",
     ):
         with pytest.raises(ModelDownloadError, match="API URL"):
-            LicenseClient(url, lambda: "secret")
+            _AsyncLicenseTransport(url, secret_key)
     with pytest.raises(TypeError, match="callable"):
-        LicenseClient("https://example.com", "secret")  # type: ignore[arg-type]
-    LicenseClient("http://127.0.0.1:8000", lambda: "secret")
+        _AsyncLicenseTransport("https://example.com", "secret")  # type: ignore[arg-type]
+    _AsyncLicenseTransport("http://127.0.0.1:8000", secret_key)
 
 
 @pytest.mark.asyncio
 async def test_client_rejects_empty_license_and_unsafe_model_paths() -> None:
-    client = async_client(lambda request: httpx.Response(500), lambda: "")
+    async def empty_key() -> str:
+        return ""
+
+    client = async_client(lambda request: httpx.Response(500), empty_key)
     with pytest.raises(ModelDownloadError, match="must not be empty"):
         await client.list_models()
     for path in ("../secret", "a//file", "a\\file", "file\x01"):
@@ -217,6 +221,10 @@ async def test_download_range_records_retry_after_and_retries(tmp_path: Path, mo
         ]
     )
     errors = []
+
+    async def record_error(event) -> None:
+        errors.append(event)
+
     descriptor = os.open(tmp_path / "partial", os.O_RDWR | os.O_CREAT, 0o600)
     monkeypatch.setattr("opai_models.download.secrets.randbelow", lambda maximum: 0)
     sleep = AsyncMock()
@@ -231,7 +239,7 @@ async def test_download_range_records_retry_after_and_retries(tmp_path: Path, mo
                 1,
                 1,
                 chunk_index=4,
-                on_error=errors.append,
+                on_error=record_error,
             )
             == 3
         )
@@ -249,6 +257,10 @@ async def test_download_range_treats_disk_full_as_permanent(tmp_path: Path) -> N
     # MockTransport surfaces handler OSError directly, exercising disk/network classification.
     descriptor = os.open(tmp_path / "partial", os.O_RDWR | os.O_CREAT, 0o600)
     errors = []
+
+    async def record_error(event) -> None:
+        errors.append(event)
+
     try:
         with pytest.raises(PermanentDownloadError):
             await _download_range(
@@ -259,7 +271,7 @@ async def test_download_range_treats_disk_full_as_permanent(tmp_path: Path) -> N
                 8,
                 1,
                 chunk_index=2,
-                on_error=errors.append,
+                on_error=record_error,
             )
     finally:
         os.close(descriptor)
@@ -306,7 +318,9 @@ def test_sha256_missing_and_wrong_length_base64() -> None:
 def test_cli_human_output_progress_prompt_and_json_error(monkeypatch, capsys) -> None:
     monkeypatch.setenv("OPAI_LICENSE_KEY", "secret")
     listing = {"models": ["a", "sub"], "next_cursor": None}
-    with patch("opai_models.cli.LicenseClient.list_models", return_value=listing):
+    with patch(
+        "opai_models.cli._AsyncLicenseTransport.list_models", AsyncMock(return_value=listing)
+    ):
         assert main(["list"]) == 0
     output = capsys.readouterr().out
     assert output.splitlines() == ["a", "sub"]
@@ -319,19 +333,26 @@ def test_cli_human_output_progress_prompt_and_json_error(monkeypatch, capsys) ->
         assert _license_key("OPAI_LICENSE_KEY", prompt=True) == "prompted"
 
     monkeypatch.setenv("OPAI_LICENSE_KEY", "secret")
-    with patch("opai_models.cli.LicenseClient.list_models", side_effect=ModelDownloadError("safe")):
+    with patch(
+        "opai_models.cli._AsyncLicenseTransport.list_models",
+        AsyncMock(side_effect=ModelDownloadError("safe")),
+    ):
         assert main(["--json", "list"]) == 1
     assert json.loads(capsys.readouterr().err) == {"event": "error", "error": "safe"}
 
-    _progress(
-        {
-            "event": "chunk_complete",
-            "completed_bytes": 512,
-            "total_bytes": 1024,
-            "bytes_per_second": 256,
-        }
+    __import__("asyncio").run(
+        _progress(
+            {
+                "event": "chunk_complete",
+                "completed_bytes": 512,
+                "total_bytes": 1024,
+                "bytes_per_second": 256,
+            }
+        )
     )
-    _progress({"event": "complete", "path": "a", "destination": "output/a"})
+    __import__("asyncio").run(
+        _progress({"event": "complete", "path": "a", "destination": "output/a"})
+    )
     stderr = capsys.readouterr().err
     assert "50.00%" in stderr and "Downloaded a" in stderr
     assert _human_size(2 * 1024**4) == "2.00 TiB"

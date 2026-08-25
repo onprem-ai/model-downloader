@@ -129,10 +129,13 @@ from pathlib import Path
 
 from opai_models import AsyncModelClient, DownloadManager
 
+async def license_provider() -> str:
+    return os.environ["OPAI_LICENSE_KEY"]
+
+
 client = AsyncModelClient(
     "https://license.api.onprem.ai",
-    # May also be an async callable for Vault/secret-manager integrations.
-    license_provider=lambda: os.environ["OPAI_LICENSE_KEY"],
+    license_provider=license_provider,
     sigstore_identity=os.environ["OPAI_SIGSTORE_IDENTITY"],
     sigstore_issuer=os.environ["OPAI_SIGSTORE_ISSUER"],
 )
@@ -150,10 +153,12 @@ finally:
     await client.aclose()
 ```
 
-The client uses a reusable native-async HTTPX connection pool. The license
-provider is called for each authenticated API request and may return either a
-string or an awaitable string. Credentials remain in memory and are not stored
-in the downloader database or model directory.
+The client uses a reusable native-async HTTPX connection pool. The async license
+provider is awaited for each authenticated API request. Credentials remain in
+memory and are not stored in the downloader database or model directory.
+
+Progress callbacks are async and are awaited on the event loop before the
+operation continues. A callback that needs blocking I/O must explicitly offload it.
 
 For a web service, create exactly one manager per application process in the
 FastAPI lifespan. See the complete commented example:

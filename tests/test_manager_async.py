@@ -276,17 +276,21 @@ async def test_wait_calls_sync_and_async_observers(tmp_path: Path) -> None:
     value = manager(tmp_path)
     job = await value.enqueue("example")
     await value.cancel(job.id)
-    sync_states = []
-    assert (
-        await value.wait(job.id, on_update=lambda item: sync_states.append(item.state))
-    ).state == "cancelled"
-    async_states = []
+    states = []
 
     async def observe(item):
-        async_states.append(item.state)
+        states.append(item.state)
 
     assert (await value.wait(job.id, on_update=observe)).state == "cancelled"
-    assert sync_states == ["cancelled"] and async_states == ["cancelled"]
+    assert states == ["cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_wait_rejects_synchronous_observer(tmp_path: Path) -> None:
+    value = manager(tmp_path)
+    job = await value.enqueue("example")
+    with pytest.raises(TypeError, match="on_update must be an async callable"):
+        await value.wait(job.id, on_update=lambda item: None)
 
 
 @pytest.mark.asyncio

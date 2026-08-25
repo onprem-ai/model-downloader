@@ -1,5 +1,5 @@
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from opai_models.cli import main
 from opai_models.client import ModelAccess
@@ -8,7 +8,9 @@ from opai_models.client import ModelAccess
 def test_list_json_uses_configured_license(monkeypatch, capsys) -> None:
     monkeypatch.setenv("OPAI_LICENSE_KEY", "secret")
     listing = {"models": ["a", "b"], "next_cursor": None}
-    with patch("opai_models.cli.LicenseClient.list_models", return_value=listing):
+    with patch(
+        "opai_models.cli._AsyncLicenseTransport.list_models", AsyncMock(return_value=listing)
+    ):
         assert main(["--json", "list"]) == 0
     assert json.loads(capsys.readouterr().out) == listing
 
@@ -24,9 +26,11 @@ def test_info_does_not_print_signed_url(monkeypatch, capsys) -> None:
         checksums={},
         required_headers={},
     )
-    with patch("opai_models.cli.LicenseClient.access", return_value=access) as fetch:
+    with patch(
+        "opai_models.cli._AsyncLicenseTransport.access", AsyncMock(return_value=access)
+    ) as fetch:
         assert main(["info", "example", "config.json"]) == 0
-    fetch.assert_called_once_with("example", "config.json")
+    fetch.assert_awaited_once_with("example", "config.json")
     output = capsys.readouterr().out
     assert "config.json" in output
     assert "signature=secret" not in output

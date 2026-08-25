@@ -1,11 +1,16 @@
 import httpx
 import pytest
+from conftest import secret_key
 
-from opai_models.client import LicenseClient, ModelDownloadError, TransientModelDownloadError
+from opai_models.client import (
+    ModelDownloadError,
+    TransientModelDownloadError,
+    _AsyncLicenseTransport,
+)
 
 
-def client(handler, key=lambda: "secret") -> LicenseClient:
-    return LicenseClient(
+def client(handler, key=secret_key) -> _AsyncLicenseTransport:
+    return _AsyncLicenseTransport(
         "https://license.example",
         key,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
@@ -25,11 +30,11 @@ async def test_restricts_model_ids_and_relative_paths() -> None:
 
 
 def test_relative_directory_prefix_validation() -> None:
-    assert LicenseClient._relative_path("nested/", prefix=True) == "nested/"
-    assert LicenseClient._relative_path("nested", prefix=True) == "nested/"
+    assert _AsyncLicenseTransport._relative_path("nested/", prefix=True) == "nested/"
+    assert _AsyncLicenseTransport._relative_path("nested", prefix=True) == "nested/"
     for value in ("", "/nested/", "../nested/", "nested//child/"):
         with pytest.raises(ModelDownloadError, match="model-relative path"):
-            LicenseClient._relative_path(value, prefix=True)
+            _AsyncLicenseTransport._relative_path(value, prefix=True)
 
 
 @pytest.mark.asyncio
@@ -49,7 +54,10 @@ async def test_access_parses_relative_metadata_without_logging_url() -> None:
         requests.append(request)
         return httpx.Response(200, json=body)
 
-    instance = client(handler, lambda: "license-secret")
+    async def credentials() -> str:
+        return "license-secret"
+
+    instance = client(handler, credentials)
     result = await instance.access("example", "a.bin")
     assert result.path == "a.bin"
     assert result.size == 12
