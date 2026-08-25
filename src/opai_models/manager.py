@@ -45,7 +45,7 @@ JobState = Literal[
 FileState = Literal["queued", "downloading", "verifying", "completed", "failed"]
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 _RUNNING = frozenset({"snapshotting", "downloading", "retry_wait", "verifying"})
-_JOB_COLUMNS = """id, model_id, destination, state, completed_bytes, total_bytes,
+_JOB_COLUMNS = """id, model_dir_name, destination, state, completed_bytes, total_bytes,
 completed_files, total_files, bytes_per_second, run_count, consecutive_failures,
 next_retry_at, last_progress_at, snapshot_sha256, error_code, error_message,
 created_at, updated_at, started_at, completed_at, worker_id, lease_expires_at,
@@ -66,7 +66,7 @@ class JobConflictError(RuntimeError):
 @dataclass(frozen=True)
 class DownloadJob:
     id: str
-    model_id: str
+    model_dir_name: str
     destination: str
     state: JobState
     completed_bytes: int
@@ -148,7 +148,7 @@ class SQLiteQueueStore:
     _EXPECTED_COLUMNS = {
         "download_jobs": {
             "id",
-            "model_id",
+            "model_dir_name",
             "destination",
             "state",
             "completed_bytes",
@@ -262,7 +262,7 @@ class SQLiteQueueStore:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS download_jobs (
-                  id TEXT PRIMARY KEY, model_id TEXT NOT NULL, destination TEXT NOT NULL,
+                  id TEXT PRIMARY KEY, model_dir_name TEXT NOT NULL, destination TEXT NOT NULL,
                   state TEXT NOT NULL CHECK(state IN ('queued','snapshotting','downloading',
                     'retry_wait','verifying','completed','failed','cancel_requested','cancelled')),
                   completed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(completed_bytes >= 0),
@@ -334,17 +334,17 @@ class SQLiteQueueStore:
         values["retryable"] = bool(values["retryable"])
         return DownloadError(**values)
 
-    def enqueue(self, model_id: str, destination: str) -> DownloadJob:
+    def enqueue(self, model_dir_name: str, destination: str) -> DownloadJob:
         now, job_id = _timestamp(), str(uuid.uuid4())
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             conflict = connection.execute(
-                "SELECT id,model_id,state FROM download_jobs "
+                "SELECT id,model_dir_name,state FROM download_jobs "
                 "WHERE destination=? ORDER BY created_at DESC LIMIT 1",
                 (destination,),
             ).fetchone()
-            if conflict and conflict["model_id"] == model_id:
+            if conflict and conflict["model_dir_name"] == model_dir_name:
                 if conflict["state"] in _RUNNING or conflict["state"] == "queued":
                     connection.commit()
                     return self.get(str(conflict["id"]))
@@ -362,9 +362,9 @@ class SQLiteQueueStore:
                     f"an active download already targets this destination: {conflict['id']}"
                 )
             connection.execute(
-                "INSERT INTO download_jobs(id,model_id,destination,state,last_progress_at,"
+                "INSERT INTO download_jobs(id,model_dir_name,destination,state,last_progress_at,"
                 "created_at,updated_at) VALUES(?,?,?,'queued',?,?,?)",
-                (job_id, model_id, destination, now, now, now),
+                (job_id, model_dir_name, destination, now, now, now),
             )
             connection.commit()
         except Exception:
@@ -982,8 +982,10 @@ class DownloadManager:
     async def __aexit__(self, *args: object) -> None:
         await self.close()
 
-    def _destination(self, model_id: str, destination: str | Path | None) -> Path:
-        relative = Path(destination) if destination is not None else Path(model_id.rstrip("/")).name
+    def _destination(self, model_dir_name: str, destination: str | Path | None) -> Path:
+        relative = (
+            Path(destination) if destination is not None else Path(model_dir_name.rstrip("/")).name
+        )
         relative = Path(relative)
         resolved = (
             relative.resolve()
@@ -996,10 +998,10 @@ class DownloadManager:
 
     async def enqueue(
         self,
-        model_id: str,
+        model_dir_name: str,
         destination: str | Path | None = None,
     ) -> DownloadJob:
-        model = _AsyncLicenseTransport._model_id(model_id)
+        model = _AsyncLicenseTransport._model_dir_name(model_dir_name)
         job = await asyncio.to_thread(
             self.store.enqueue, model, str(self._destination(model, destination))
         )
@@ -1082,7 +1084,7 @@ class DownloadManager:
         heartbeat = asyncio.create_task(self._heartbeat(job.id, token, cancel, shutdown))
         try:
             if job.snapshot_sha256 is None:
-                snapshot = await self.client.snapshot_model(job.model_id)
+                snapshot = await self.client.snapshot_model(job.model_dir_name)
                 if not await asyncio.to_thread(self.store.save_snapshot, job.id, token, snapshot):
                     return
             # Directory transfer is implemented by AsyncModelClient against the persisted snapshot.

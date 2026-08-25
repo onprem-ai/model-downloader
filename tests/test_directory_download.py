@@ -130,7 +130,7 @@ async def test_pull_model_stages_verifies_and_atomically_publishes(tmp_path: Pat
     contents = {"config.json": b"config", "weights/model.bin": b"weights"}
     snap = snapshot(contents)
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue(snap.model_id, str(tmp_path / "final"))
+    job = store.enqueue(snap.model_dir_name, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed
     token = claimed[1]
@@ -138,7 +138,7 @@ async def test_pull_model_stages_verifies_and_atomically_publishes(tmp_path: Pat
 
     client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
 
-    async def pull_file(client, model_id, path, destination, **kwargs):
+    async def pull_file(client, model_dir_name, path, destination, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents[path])
         await kwargs["mark_complete"](0, destination.stat().st_size, 123)
@@ -174,7 +174,7 @@ async def test_pull_model_without_verification_uses_inventory_without_manifest(
         provenance(),
     )
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue(snap.model_id, str(tmp_path / "final"))
+    job = store.enqueue(snap.model_dir_name, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
     client = AsyncModelClient(
@@ -184,7 +184,7 @@ async def test_pull_model_without_verification_uses_inventory_without_manifest(
         verify_signatures=False,
     )
 
-    async def pull_file(client, model_id, path, destination, **kwargs):
+    async def pull_file(client, model_dir_name, path, destination, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents[path])
         await kwargs["mark_complete"](0, destination.stat().st_size, 123)
@@ -206,12 +206,12 @@ async def test_pull_model_rejects_checksum_and_preserves_staging(tmp_path: Path)
     contents = {"file": b"correct"}
     snap = snapshot(contents)
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue(snap.model_id, str(tmp_path / "final"))
+    job = store.enqueue(snap.model_dir_name, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
     client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
 
-    async def corrupt(client, model_id, path, destination, **kwargs):
+    async def corrupt(client, model_dir_name, path, destination, **kwargs):
         relative = path
         destination.write_bytes(b"wrong" if relative == "file" else contents[relative])
         return destination
@@ -250,7 +250,7 @@ async def test_pull_model_rejects_unrelated_existing_destination(tmp_path: Path)
 async def test_pull_model_rejects_symlink_staging_path(tmp_path: Path) -> None:
     snap = snapshot({"file": b"correct"})
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue(snap.model_id, str(tmp_path / "final"))
+    job = store.enqueue(snap.model_dir_name, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
     outside = tmp_path / "outside"
@@ -265,7 +265,7 @@ async def test_pull_model_rejects_symlink_staging_path(tmp_path: Path) -> None:
 async def test_pull_model_rejects_staging_file_symlink(tmp_path: Path) -> None:
     snap = snapshot({"file": b"correct"})
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue(snap.model_id, str(tmp_path / "final"))
+    job = store.enqueue(snap.model_dir_name, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
     staging = tmp_path / f".final.{job.id}.partial"
@@ -283,7 +283,7 @@ async def test_pull_model_rejects_staging_file_symlink(tmp_path: Path) -> None:
 async def test_pull_model_rejects_nested_staging_symlink(tmp_path: Path) -> None:
     snap = snapshot({"nested/file": b"correct"})
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue(snap.model_id, str(tmp_path / "final"))
+    job = store.enqueue(snap.model_dir_name, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
     staging = tmp_path / f".final.{job.id}.partial"
@@ -293,7 +293,7 @@ async def test_pull_model_rejects_nested_staging_symlink(tmp_path: Path) -> None
     (staging / "nested").symlink_to(outside, target_is_directory=True)
     client = AsyncModelClient("https://license.example", license_key, verify_signatures=False)
 
-    async def pull_source(client, model_id, path, destination, **kwargs):
+    async def pull_source(client, model_dir_name, path, destination, **kwargs):
         destination.write_bytes(contents[path])
         return destination
 
@@ -314,11 +314,11 @@ async def test_pull_model_rejects_lost_lease_before_publish(tmp_path: Path) -> N
     contents = {"file": b"correct"}
     snap = snapshot(contents)
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue(snap.model_id, str(tmp_path / "final"))
+    job = store.enqueue(snap.model_dir_name, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
 
-    async def pull_file(client, model_id, path, destination, **kwargs):
+    async def pull_file(client, model_dir_name, path, destination, **kwargs):
         data = contents[path]
         destination.write_bytes(data)
         await kwargs["mark_complete"](0, len(data), 1)
@@ -342,7 +342,7 @@ async def test_pull_model_recovers_after_rename_before_queue_finish(tmp_path: Pa
     contents = {"file": b"correct"}
     snap = snapshot(contents)
     store = SQLiteQueueStore(tmp_path / "queue.sqlite")
-    job = store.enqueue(snap.model_id, str(tmp_path / "final"))
+    job = store.enqueue(snap.model_dir_name, str(tmp_path / "final"))
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
     destination = tmp_path / "final"

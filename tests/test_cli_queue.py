@@ -8,7 +8,7 @@ from opai_models.manager import DownloadJob
 def job(state: str = "completed") -> DownloadJob:
     return DownloadJob(
         id="id",
-        model_id="example",
+        model_dir_name="example",
         destination="/downloads/example",
         state=state,
         completed_bytes=10,
@@ -156,7 +156,7 @@ def test_cli_pull_can_explicitly_skip_signature_verification(monkeypatch, tmp_pa
 def test_cli_sync_forwards_policy(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setenv("OPAI_LICENSE_KEY", "secret")
     result = MagicMock(
-        model_id="example",
+        model_dir_name="example",
         destination=tmp_path / "example",
         files=2,
         bytes=10,

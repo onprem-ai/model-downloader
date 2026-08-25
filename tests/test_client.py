@@ -18,11 +18,11 @@ def client(handler, key=secret_key) -> _AsyncLicenseTransport:
 
 
 @pytest.mark.asyncio
-async def test_restricts_model_ids_and_relative_paths() -> None:
+async def test_restricts_model_dir_names_and_relative_paths() -> None:
     instance = client(lambda request: httpx.Response(500))
-    for model_id in ("", "namespace/example", "a/b", "..", "bad\n"):
-        with pytest.raises(ModelDownloadError, match="model ID"):
-            await instance.access(model_id, "file")
+    for model_dir_name in ("", "namespace/example", "a/b", "..", "bad\n"):
+        with pytest.raises(ModelDownloadError, match="model directory name"):
+            await instance.access(model_dir_name, "file")
     for path in ("../secret", "a//file", "a\\file", "file\x01", "folder/"):
         with pytest.raises(ModelDownloadError, match="model"):
             await instance.access("example", path)
@@ -92,7 +92,7 @@ async def test_list_models_rejects_bad_results_and_repeated_cursor() -> None:
     for body, message in (
         ({"models": {}, "next_cursor": None}, "invalid model listing"),
         ({"models": [], "next_cursor": "same"}, "repeated"),
-        ({"models": ["namespace/model"], "next_cursor": None}, "model ID"),
+        ({"models": ["namespace/model"], "next_cursor": None}, "model directory name"),
     ):
         instance = client(lambda request, body=body: httpx.Response(200, json=body))
         with pytest.raises(ModelDownloadError, match=message):
@@ -101,7 +101,7 @@ async def test_list_models_rejects_bad_results_and_repeated_cursor() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_page_uses_model_id_and_relative_prefix() -> None:
+async def test_list_page_uses_model_dir_name_and_relative_prefix() -> None:
     requests = []
 
     def handler(request):
@@ -131,7 +131,7 @@ async def test_list_all_follows_cursor_and_deduplicates_prefixes(monkeypatch) ->
     result = await instance.list_all("example")
     assert [item["key"] for item in result["objects"]] == ["a", "b"]
     assert result["prefixes"] == ["sub/"]
-    assert result["model_id"] == "example"
+    assert result["model_dir_name"] == "example"
     assert mocked.await_count == 2
     await instance.http.aclose()
 
@@ -147,7 +147,7 @@ async def test_list_normalizes_null_collections_and_rejects_bad_pages(monkeypatc
         AsyncMock(return_value={"objects": None, "prefixes": None, "next_cursor": None}),
     )
     assert await instance.list_all("example") == {
-        "model_id": "example",
+        "model_dir_name": "example",
         "prefix": "",
         "objects": [],
         "prefixes": [],

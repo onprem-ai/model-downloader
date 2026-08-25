@@ -31,7 +31,7 @@ class ModelFile:
 
 @dataclass(frozen=True)
 class ModelSnapshot:
-    model_id: str
+    model_dir_name: str
     files: tuple[ModelFile, ...]
     file_count: int
     total_bytes: int
@@ -42,7 +42,7 @@ class ModelSnapshot:
     @classmethod
     def create(
         cls,
-        model_id: str,
+        model_dir_name: str,
         files: list[ModelFile],
         source: SourceDocument | None = None,
     ) -> "ModelSnapshot":
@@ -61,7 +61,7 @@ class ModelSnapshot:
             ).encode()
             sha256sums = None
         return cls(
-            model_id,
+            model_dir_name,
             ordered,
             len(ordered),
             sum(item.size for item in ordered),
@@ -87,14 +87,14 @@ def _sha256(value: str | None) -> str | None:
 
 async def snapshot_model(
     client: _AsyncLicenseTransport,
-    model_id: str,
+    model_dir_name: str,
     *,
     verify_checksums: bool = True,
     verify_signatures: bool = True,
     trusted_identity: SigstoreIdentity | None = None,
     sigstore_offline: bool = False,
 ) -> ModelSnapshot:
-    model = _AsyncLicenseTransport._model_id(model_id)
+    model = _AsyncLicenseTransport._model_dir_name(model_dir_name)
     listings: list[dict[str, object]] = []
     pending = [""]
     visited: set[str] = set()

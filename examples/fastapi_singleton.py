@@ -23,7 +23,7 @@ class AppState(TypedDict):
 
 
 class DownloadRequest(BaseModel):
-    model_id: str
+    model_dir_name: str
     destination: str | None = None
 
 
@@ -74,7 +74,7 @@ Downloads = Annotated[DownloadManager, Depends(get_download_manager)]
 
 @app.post("/downloads", status_code=202)
 async def create_download(body: DownloadRequest, downloads: Downloads) -> dict[str, object]:
-    job = await downloads.enqueue(body.model_id, body.destination)
+    job = await downloads.enqueue(body.model_dir_name, body.destination)
     return job.to_dict()
 
 

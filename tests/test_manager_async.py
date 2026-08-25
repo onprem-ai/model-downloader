@@ -44,7 +44,7 @@ def manager(tmp_path: Path, client=None, **kwargs) -> DownloadManager:
 async def test_manager_public_api_and_context_lifecycle(tmp_path: Path) -> None:
     value = manager(tmp_path)
     job = await value.enqueue("example")
-    assert (await value.get(job.id)).model_id == "example"
+    assert (await value.get(job.id)).model_dir_name == "example"
     assert (await value.list(state="queued"))[0].id == job.id
     assert (await value.cancel(job.id)).state == "cancelled"
     with pytest.raises(Exception, match="not retryable"):

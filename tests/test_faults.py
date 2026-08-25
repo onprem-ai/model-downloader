@@ -70,7 +70,7 @@ async def test_client_rejects_empty_license_and_unsafe_model_paths() -> None:
     for path in ("../secret", "a//file", "a\\file", "file\x01"):
         with pytest.raises(ModelDownloadError, match="invalid"):
             await client.access("example", path)
-    with pytest.raises(ModelDownloadError, match="model ID"):
+    with pytest.raises(ModelDownloadError, match="model directory name"):
         await client.access("namespace/example", "file")
     await client.http.aclose()
 

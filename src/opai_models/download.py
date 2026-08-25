@@ -80,9 +80,14 @@ def _permanent_os_error(error: OSError) -> bool:
 
 
 class AccessProvider:
-    def __init__(self, client: _AsyncLicenseTransport, model_id: str, object_path: str) -> None:
+    def __init__(
+        self,
+        client: _AsyncLicenseTransport,
+        model_dir_name: str,
+        object_path: str,
+    ) -> None:
         self.client = client
-        self.model_id = model_id
+        self.model_dir_name = model_dir_name
         self.object_path = object_path
         self._lock = asyncio.Lock()
         self._access: ModelAccess | None = None
@@ -91,7 +96,7 @@ class AccessProvider:
     async def get(self, *, refresh: bool = False) -> ModelAccess:
         async with self._lock:
             if refresh or self._access is None:
-                new_access = await self.client.access(self.model_id, self.object_path)
+                new_access = await self.client.access(self.model_dir_name, self.object_path)
                 if self._access and (
                     new_access.source_id != self._access.source_id
                     or new_access.size != self._access.size
@@ -296,7 +301,7 @@ def _file_size(path: Path) -> int:
 
 async def pull_file_with_state(
     client: _AsyncLicenseTransport,
-    model_id: str,
+    model_dir_name: str,
     object_path: str,
     partial: Path,
     *,
@@ -316,7 +321,7 @@ async def pull_file_with_state(
     verify_checksum: bool = True,
 ) -> Path:
     """Download one file asynchronously while an external store owns chunk state."""
-    provider = AccessProvider(client, model_id, object_path)
+    provider = AccessProvider(client, model_dir_name, object_path)
     access = await provider.get()
     if access.source_id != expected_source_id or access.size != expected_size:
         raise ModelDownloadError("source model changed while downloading")

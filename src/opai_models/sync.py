@@ -23,7 +23,7 @@ SyncProgress = Callable[[dict[str, Any]], Awaitable[None]]
 
 @dataclass(frozen=True)
 class SyncResult:
-    model_id: str
+    model_dir_name: str
     destination: Path
     files: int
     bytes: int
@@ -97,7 +97,7 @@ async def _notify(callback: SyncProgress | None, event: dict[str, Any]) -> None:
 
 async def sync_model(
     client: Any,
-    model_id: str,
+    model_dir_name: str,
     destination: Path,
     *,
     rehash: bool = False,
@@ -116,7 +116,7 @@ async def sync_model(
     staging = destination.with_name(f".{destination.name}.sync.partial")
     backup = destination.with_name(f".{destination.name}.sync.previous")
     await asyncio.to_thread(_prepare_sync_paths, destination, staging, backup)
-    snapshot = await client.snapshot_model(model_id)
+    snapshot = await client.snapshot_model(model_dir_name)
     if snapshot.sha256sums is None or any(item.sha256 is None for item in snapshot.files):
         raise ModelDownloadError("sync requires the remote SHA256SUMS inventory")
     remote_manifest = snapshot.sha256sums.encode()
@@ -190,7 +190,7 @@ async def sync_model(
 
             await pull_file_with_state(
                 client._client,
-                snapshot.model_id,
+                snapshot.model_dir_name,
                 item.object_path,
                 target,
                 expected_source_id=item.source_id,
@@ -223,7 +223,7 @@ async def sync_model(
         await asyncio.to_thread(_write_bytes, staging / "SHA256SUMS", remote_manifest)
         if client.verify_signatures:
             signature = await client._client.read_small(
-                snapshot.model_id,
+                snapshot.model_dir_name,
                 "SHA256SUMS.sigstore.json",
                 maximum=16 * 1024 * 1024,
             )
@@ -258,7 +258,7 @@ async def sync_model(
         raise
 
     return SyncResult(
-        model_id=snapshot.model_id,
+        model_dir_name=snapshot.model_dir_name,
         destination=destination,
         files=snapshot.file_count,
         bytes=snapshot.total_bytes,

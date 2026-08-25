@@ -86,10 +86,10 @@ local model file, and `--delete` to omit files that are no longer in the remote
 manifest. Synchronization builds a hidden sibling replacement directory and
 uses a rollback-safe replacement only after all required files are ready.
 
-The argument is the model ID, not an S3 path. The downloader never needs a
-bucket name, S3 endpoint, storage prefix, or permanent S3 credential. The
-License Server maps the model ID to storage and returns short-lived download
-URLs.
+The argument is the model directory name, not an S3 path. The downloader never
+needs a bucket name, S3 endpoint, storage prefix, or permanent S3 credential.
+The License Server maps the model directory name to storage and returns
+short-lived download URLs.
 
 The default API is `https://license.api.onprem.ai`. Interrupted downloads resume
 from durable per-file, per-chunk state. Transient failures enter `retry_wait` and

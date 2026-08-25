@@ -19,9 +19,9 @@
 artifact client and must not manage OCI images, Zarf packages, publisher
 credentials, licenses, or License Server administration.
 
-A model is identified publicly by one opaque model ID. The License Server maps
-that ID to its configured storage namespace. For example, model ID
-`example-model` may contain:
+A model directory is identified publicly by one opaque model directory name.
+The License Server maps that name to its configured storage namespace. For
+example, model directory name `example-model` may contain:
 
 ```text
 example-model/
@@ -41,13 +41,14 @@ The client uses the model-specific License Server APIs:
 
 ```text
 GET /v1/models
-GET /v1/models/{model_id}/files
-GET /v1/models/{model_id}/access/{relative_path:path}
+GET /v1/models/{model_dir_name}/files
+GET /v1/models/{model_dir_name}/access/{relative_path:path}
 ```
 
 Requirements:
 
-- Accept only one-segment model IDs and normalized model-relative file paths.
+- Accept only one-segment model directory names and normalized model-relative
+  file paths.
 - Never expose or require the backing S3 namespace in the downloader API.
 - Recursively traverse paginated directory listings.
 - Treat the access response as authoritative for object size, source identity,
@@ -122,8 +123,8 @@ The CLI is a thin foreground consumer of the same public library:
 
 ```text
 opai-models list
-opai-models info <model-id> <relative-file-path>
-opai-models pull <model-id> [destination-directory]
+opai-models info <model-dir-name> <relative-file-path>
+opai-models pull <model-dir-name> [destination-directory]
 ```
 
 Requirements:
@@ -162,7 +163,7 @@ For every file, collect and persist:
 
 At job level, persist:
 
-- model ID;
+- model directory name;
 - total file count;
 - total expected bytes;
 - deterministic snapshot SHA-256.
@@ -188,7 +189,7 @@ The persistence model must represent the hierarchy directly.
 One row per model directory:
 
 - UUID job ID;
-- model ID and final destination directory;
+- model directory name and final destination directory;
 - state;
 - total/verified file counts;
 - expected/completed bytes;
@@ -282,9 +283,9 @@ Rules:
 - Retry only downloads failed or incomplete files and never redownloads files
   whose local size and computed checksum still match the snapshot.
 - A failed job can be explicitly retried; transient failures retry automatically while progress remains within the configured timeout.
-- Re-enqueuing the same model ID and destination attaches to the active job,
-  enabling a restarted CLI to resume it. A different model targeting the same
-  final destination or staging tree is rejected.
+- Re-enqueuing the same model directory name and destination attaches to the
+  active job, enabling a restarted CLI to resume it. A different model directory
+  targeting the same final destination or staging tree is rejected.
 
 ## 9. SQLite claim, lease, and recovery rules
 
@@ -477,8 +478,8 @@ owns the process-scoped resource.
   headers.
 - Never include secret-bearing HTTP or validation exceptions verbatim in API or
   CLI output.
-- Reject multi-segment model IDs, traversal segments, control characters, and
-  unsafe model-relative or destination paths.
+- Reject multi-segment model directory names, traversal segments, control
+  characters, and unsafe model-relative or destination paths.
 - Require HTTPS for production API and signed URLs; permit HTTP only for
   loopback tests.
 - Keep partial files, state, SQLite databases, and metadata non-world-readable.

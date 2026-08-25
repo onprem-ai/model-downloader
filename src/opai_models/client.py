@@ -89,7 +89,7 @@ class _AsyncLicenseTransport:
         return key
 
     @staticmethod
-    def _model_id(value: str) -> str:
+    def _model_dir_name(value: str) -> str:
         if (
             not isinstance(value, str)
             or not value
@@ -99,7 +99,7 @@ class _AsyncLicenseTransport:
             or value in {".", ".."}
             or any(ord(character) < 32 or ord(character) == 127 for character in value)
         ):
-            raise ModelDownloadError("invalid model ID")
+            raise ModelDownloadError("invalid model directory name")
         return value
 
     @staticmethod
@@ -154,10 +154,10 @@ class _AsyncLicenseTransport:
         return body
 
     async def read_small(
-        self, model_id: str, relative_path: str, *, maximum: int = 1024 * 1024
+        self, model_dir_name: str, relative_path: str, *, maximum: int = 1024 * 1024
     ) -> bytes:
         """Read a bounded model metadata object through a short-lived direct URL."""
-        access = await self.access(model_id, relative_path)
+        access = await self.access(model_dir_name, relative_path)
         if access.size > maximum:
             raise ModelDownloadError("model metadata file is too large")
         parsed = urllib.parse.urlparse(access.url)
@@ -196,8 +196,8 @@ class _AsyncLicenseTransport:
             )
         return bytes(body)
 
-    async def access(self, model_id: str, relative_path: str) -> ModelAccess:
-        model = self._model_id(model_id)
+    async def access(self, model_dir_name: str, relative_path: str) -> ModelAccess:
+        model = self._model_dir_name(model_dir_name)
         path = self._relative_path(relative_path)
         body = await self._json(f"/v1/models/{self._encoded(model)}/access/{self._encoded(path)}")
         try:
@@ -256,7 +256,7 @@ class _AsyncLicenseTransport:
             values = page.get("models", [])
             if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
                 raise ModelDownloadError("License Server returned an invalid model listing")
-            models.update(self._model_id(value) for value in values)
+            models.update(self._model_dir_name(value) for value in values)
             cursor_value = page.get("next_cursor")
             cursor = str(cursor_value) if cursor_value else None
             if not cursor:
@@ -268,13 +268,13 @@ class _AsyncLicenseTransport:
 
     async def list_page(
         self,
-        model_id: str,
+        model_dir_name: str,
         prefix: str = "",
         *,
         limit: int = 1000,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        model = self._model_id(model_id)
+        model = self._model_dir_name(model_dir_name)
         query: dict[str, str | int] = {"limit": limit}
         if prefix:
             query["prefix"] = self._relative_path(prefix, prefix=True)
@@ -285,12 +285,12 @@ class _AsyncLicenseTransport:
         )
 
     async def list_all(
-        self, model_id: str, prefix: str = "", *, limit: int = 1000
+        self, model_dir_name: str, prefix: str = "", *, limit: int = 1000
     ) -> dict[str, Any]:
         objects: list[dict[str, Any]] = []
         prefixes: set[str] = set()
         cursor: str | None = None
-        model = self._model_id(model_id)
+        model = self._model_dir_name(model_dir_name)
         normalized_prefix = self._relative_path(prefix, prefix=True) if prefix else ""
         seen_cursors: set[str] = set()
         while True:
@@ -313,7 +313,7 @@ class _AsyncLicenseTransport:
                 raise ModelDownloadError("License Server repeated a pagination cursor")
             seen_cursors.add(cursor)
         return {
-            "model_id": model,
+            "model_dir_name": model,
             "prefix": normalized_prefix,
             "objects": objects,
             "prefixes": sorted(prefixes),

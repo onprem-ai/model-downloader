@@ -166,28 +166,28 @@ class AsyncModelClient:
     async def list_models(self, *, limit: int = 1000) -> dict[str, Any]:
         return await self._client.list_models(limit=limit)
 
-    async def get_model_file(self, model_id: str, relative_path: str) -> ModelAccess:
-        return await self._client.access(model_id, relative_path)
+    async def get_model_file(self, model_dir_name: str, relative_path: str) -> ModelAccess:
+        return await self._client.access(model_dir_name, relative_path)
 
-    async def snapshot_model(self, model_id: str) -> ModelSnapshot:
+    async def snapshot_model(self, model_dir_name: str) -> ModelSnapshot:
         return await snapshot_model(
             self._client,
-            model_id,
+            model_dir_name,
             verify_checksums=self.verify_checksums,
             verify_signatures=self.verify_signatures,
             trusted_identity=self.sigstore_identity,
             sigstore_offline=self.sigstore_offline,
         )
 
-    async def get_source(self, model_id: str) -> SourceDocument:
+    async def get_source(self, model_dir_name: str) -> SourceDocument:
         """Fetch and validate provenance without retaining access material."""
-        model = _AsyncLicenseTransport._model_id(model_id)
+        model = _AsyncLicenseTransport._model_dir_name(model_dir_name)
         data = await self._client.read_small(model, ".source.json")
         return parse_source(data)
 
     async def sync_model(
         self,
-        model_id: str,
+        model_dir_name: str,
         destination: Path,
         *,
         rehash: bool = False,
@@ -204,7 +204,7 @@ class AsyncModelClient:
 
         return await sync_model(
             self,
-            model_id,
+            model_dir_name,
             destination,
             rehash=rehash,
             delete=delete,
@@ -322,7 +322,7 @@ class AsyncModelClient:
                 async with semaphore:
                     await pull_file_with_state(
                         self._client,
-                        job.model_id,
+                        job.model_dir_name,
                         item.object_path,
                         target,
                         expected_source_id=item.source_id,
@@ -409,7 +409,7 @@ class AsyncModelClient:
             if sums is None:
                 raise ModelDownloadError("signature verification requires SHA256SUMS")
             signature = await self._client.read_small(
-                job.model_id,
+                job.model_dir_name,
                 "SHA256SUMS.sigstore.json",
                 maximum=16 * 1024 * 1024,
             )

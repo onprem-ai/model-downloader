@@ -323,7 +323,7 @@ async def test_snapshot_rejects_changed_listing_and_provider_checksum() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_rejects_root_and_duplicate_objects() -> None:
     client = MagicMock(spec=_AsyncLicenseTransport)
-    with pytest.raises(ModelDownloadError, match="model ID"):
+    with pytest.raises(ModelDownloadError, match="model directory name"):
         await snapshot_model(client, "bad/id")
     client.list_all.return_value = {
         "objects": [

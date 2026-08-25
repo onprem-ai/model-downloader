@@ -96,7 +96,7 @@ async def test_changed_manifest_selectively_reuses_and_repairs(tmp_path: Path) -
     (destination / "extra").write_bytes(b"keep")
     client = client_for(new_snapshot)
 
-    def transfer(client, model_id, path, target, **kwargs):
+    def transfer(client, model_dir_name, path, target, **kwargs):
         target.write_bytes(current[path])
         return target
 

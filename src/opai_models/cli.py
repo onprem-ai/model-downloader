@@ -67,15 +67,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="emit machine-readable output")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    list_parser = subparsers.add_parser("list", help="list available model IDs")
+    list_parser = subparsers.add_parser("list", help="list available model directory names")
     list_parser.add_argument("--limit", type=int, default=1000)
 
     info_parser = subparsers.add_parser("info", help="show metadata for one model file")
-    info_parser.add_argument("model_id")
+    info_parser.add_argument("model_dir_name")
     info_parser.add_argument("relative_path")
 
     pull_parser = subparsers.add_parser("pull", help="download or resume one model directory")
-    pull_parser.add_argument("model_id")
+    pull_parser.add_argument("model_dir_name")
     pull_parser.add_argument("destination", nargs="?", type=Path)
     pull_parser.add_argument("--download-directory", type=Path, default=Path.cwd())
     pull_parser.add_argument("--database", type=Path, default=Path(".opai-model-downloads.sqlite"))
@@ -121,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser = subparsers.add_parser(
         "sync", help="synchronize an existing model directory from SHA256SUMS"
     )
-    sync_parser.add_argument("model_id")
+    sync_parser.add_argument("model_dir_name")
     sync_parser.add_argument("destination", type=Path)
     sync_parser.add_argument("--rehash", action="store_true")
     sync_parser.add_argument("--delete", action="store_true")
@@ -155,7 +155,7 @@ async def _sync(args: argparse.Namespace, license_provider) -> int:
     )
     try:
         result = await client.sync_model(
-            args.model_id,
+            args.model_dir_name,
             args.destination,
             rehash=args.rehash,
             delete=args.delete,
@@ -170,7 +170,7 @@ async def _sync(args: argparse.Namespace, license_provider) -> int:
         await client.aclose()
     output = {
         "event": "complete",
-        "model_id": result.model_id,
+        "model_dir_name": result.model_dir_name,
         "destination": str(result.destination),
         "files": result.files,
         "bytes": result.bytes,
@@ -217,7 +217,7 @@ async def _pull(args: argparse.Namespace, license_provider) -> int:
     try:
         # Enqueue before starting workers so a duplicate destination cannot
         # accidentally start or cancel an already queued job in this process.
-        queued = await manager.enqueue(args.model_id, args.destination)
+        queued = await manager.enqueue(args.model_dir_name, args.destination)
         await manager.start()
 
         async def show(job) -> None:
@@ -277,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
             async with _AsyncLicenseTransport(args.api_url, license_provider) as client:
                 if args.command == "list":
                     return await client.list_models(limit=args.limit)
-                access = await client.access(args.model_id, args.relative_path)
+                access = await client.access(args.model_dir_name, args.relative_path)
                 return {
                     "path": access.path,
                     "size": access.size,
@@ -290,8 +290,8 @@ def main(argv: list[str] | None = None) -> int:
 
         result = asyncio.run(query())
         if args.command == "list" and not args.json:
-            for model_id in result["models"]:
-                print(model_id)
+            for model_dir_name in result["models"]:
+                print(model_dir_name)
         else:
             print(json.dumps(result, indent=2))
     except (ModelDownloadError, OSError, ValueError, json.JSONDecodeError) as exc:
