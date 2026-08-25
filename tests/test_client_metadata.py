@@ -48,20 +48,42 @@ async def test_read_small_rejects_large_invalid_url_and_wrong_size(monkeypatch) 
     with pytest.raises(ModelDownloadError, match="HTTPS"):
         await instance.read_small("a", ".source.json")
     monkeypatch.setattr(instance, "access", AsyncMock(return_value=metadata_access(3)))
-    with pytest.raises(ModelDownloadError, match="size"):
+    with pytest.raises(ModelDownloadError, match="expected 3 bytes but received 2"):
         await instance.read_small("a", ".source.json")
+    await instance.http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_read_small_preserves_storage_http_error_detail(monkeypatch) -> None:
+    instance = client(
+        lambda request: httpx.Response(
+            403,
+            text="object access expired; refresh the signed URL",
+        )
+    )
+    access = metadata_access(3, "https://s3.example/meta?token=secret")
+    monkeypatch.setattr(instance, "access", AsyncMock(return_value=access))
+
+    with pytest.raises(ModelDownloadError, match="storage returned HTTP 403") as caught:
+        await instance.read_small("a", ".source.json")
+
+    message = str(caught.value)
+    assert "object access expired" in message
+    assert "token=secret" not in message
     await instance.http.aclose()
 
 
 @pytest.mark.asyncio
 async def test_read_small_sanitizes_network_errors(monkeypatch) -> None:
     def handler(request):
-        raise httpx.ConnectError("token=secret", request=request)
+        raise httpx.ConnectError("DNS lookup failed for storage.internal", request=request)
 
     instance = client(handler)
     access = metadata_access(3, "https://s3.example/meta?token=secret")
     monkeypatch.setattr(instance, "access", AsyncMock(return_value=access))
     with pytest.raises(ModelDownloadError, match="cannot read model metadata") as caught:
         await instance.read_small("a", ".source.json")
-    assert "token=secret" not in str(caught.value)
+    message = str(caught.value)
+    assert "DNS lookup failed for storage.internal" in message
+    assert "token=secret" not in message
     await instance.http.aclose()

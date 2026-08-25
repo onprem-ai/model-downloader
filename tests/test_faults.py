@@ -12,6 +12,7 @@ from opai_models.client import ModelAccess, ModelDownloadError, _AsyncLicenseTra
 from opai_models.download import (
     AccessProvider,
     PermanentDownloadError,
+    RetryableDownloadError,
     _backoff_delay,
     _download_range,
     _expected_sha256,
@@ -277,6 +278,53 @@ async def test_download_range_treats_disk_full_as_permanent(tmp_path: Path) -> N
         os.close(descriptor)
         await client.http.aclose()
     assert errors[0]["retryable"] is False
+    assert errors[0]["message"] == "OSError: [Errno 28] disk full"
+
+
+@pytest.mark.asyncio
+async def test_download_range_preserves_network_error_detail(tmp_path: Path) -> None:
+    client = download_client([httpx.ConnectError("DNS lookup failed for storage.internal")])
+    descriptor = os.open(tmp_path / "partial", os.O_RDWR | os.O_CREAT, 0o600)
+    errors = []
+
+    async def record_error(event) -> None:
+        errors.append(event)
+
+    try:
+        with pytest.raises(RetryableDownloadError) as caught:
+            await _download_range(
+                AccessProvider(client, "example", "test.bin"),
+                descriptor,
+                0,
+                2,
+                0,
+                1,
+                on_error=record_error,
+            )
+    finally:
+        os.close(descriptor)
+        await client.http.aclose()
+    assert "DNS lookup failed for storage.internal" in str(caught.value)
+    assert errors[0]["message"] == str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_download_range_redacts_signed_url_from_network_error(tmp_path: Path) -> None:
+    client = download_client(
+        [httpx.ConnectError("request failed at https://storage.example/file?token=secret")]
+    )
+    descriptor = os.open(tmp_path / "partial", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with pytest.raises(RetryableDownloadError) as caught:
+            await _download_range(
+                AccessProvider(client, "example", "test.bin"), descriptor, 0, 2, 0, 1
+            )
+    finally:
+        os.close(descriptor)
+        await client.http.aclose()
+    message = str(caught.value)
+    assert "secret" not in message
+    assert "[URL REDACTED]" in message
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from opai_models.client import ModelDownloadError
+from opai_models.errors import sanitize_error_detail
 
 
 @dataclass(frozen=True)
@@ -38,5 +39,6 @@ def verify_sigstore_bundle(
             issuer=trusted_identity.issuer,
         )
         Verifier.production(offline=offline).verify_artifact(artifact, bundle, policy)
-    except Exception:
-        raise ModelDownloadError("model signature verification failed") from None
+    except Exception as exc:
+        detail = sanitize_error_detail(exc)
+        raise ModelDownloadError(f"model signature verification failed: {detail}") from None

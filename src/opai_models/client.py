@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+from opai_models.errors import extract_http_error_detail, sanitize_error_detail
+
 AsyncLicenseProvider = Callable[[], Awaitable[str]]
 
 
@@ -129,8 +131,9 @@ class _AsyncLicenseTransport:
                 headers={"Authorization": f"Bearer {await self._license_key()}"},
             )
         except httpx.RequestError as exc:
+            detail = sanitize_error_detail(exc)
             raise TransientModelDownloadError(
-                f"Cannot reach the License Server ({exc.__class__.__name__})"
+                f"Cannot reach the License Server ({exc.__class__.__name__}): {detail}"
             ) from None
         if response.status_code >= 400:
             error_type = (
@@ -138,7 +141,10 @@ class _AsyncLicenseTransport:
                 if response.status_code in {408, 429, 500, 502, 503, 504}
                 else ModelDownloadError
             )
-            raise error_type(f"License Server returned HTTP {response.status_code}")
+            message = f"License Server returned HTTP {response.status_code}"
+            if detail := extract_http_error_detail(response.content):
+                message = f"{message}: {detail}"
+            raise error_type(message)
         try:
             body = response.json()
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
@@ -169,16 +175,25 @@ class _AsyncLicenseTransport:
                 "GET", access.url, headers=access.required_headers, timeout=self.timeout
             ) as response:
                 if response.status_code >= 400:
-                    raise TransientModelDownloadError("cannot read model metadata")
+                    message = f"storage returned HTTP {response.status_code} for model metadata"
+                    if detail := extract_http_error_detail(await response.aread()):
+                        message = f"{message}: {detail}"
+                    raise TransientModelDownloadError(message)
                 body = bytearray()
                 async for block in response.aiter_bytes():
                     body.extend(block)
                     if len(body) > maximum:
                         raise ModelDownloadError("invalid model metadata size")
-        except httpx.RequestError:
-            raise TransientModelDownloadError("cannot read model metadata") from None
+        except httpx.RequestError as exc:
+            detail = sanitize_error_detail(exc)
+            raise TransientModelDownloadError(
+                f"cannot read model metadata ({exc.__class__.__name__}): {detail}"
+            ) from None
         if len(body) != access.size:
-            raise ModelDownloadError("invalid model metadata size")
+            raise ModelDownloadError(
+                f"invalid model metadata size: expected {access.size} bytes "
+                f"but received {len(body)}"
+            )
         return bytes(body)
 
     async def access(self, model_id: str, relative_path: str) -> ModelAccess:

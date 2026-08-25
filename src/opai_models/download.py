@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from opai_models.client import ModelAccess, ModelDownloadError, _AsyncLicenseTransport
+from opai_models.errors import sanitize_error_detail
 
 _CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -203,13 +204,12 @@ async def _download_range(
         except DownloadCancelled:
             raise
         except (httpx.RequestError, RetryableDownloadError) as caught:
-            message = (
-                str(caught) if isinstance(caught, RetryableDownloadError) else type(caught).__name__
-            )
-            error = RetryableDownloadError(message)
+            detail = sanitize_error_detail(caught)
+            error = RetryableDownloadError(f"{type(caught).__name__}: {detail}")
         except OSError as caught:
+            detail = sanitize_error_detail(caught)
             if _permanent_os_error(caught):
-                error = PermanentDownloadError(type(caught).__name__)
+                error = PermanentDownloadError(f"{type(caught).__name__}: {detail}")
                 if on_error:
                     await on_error(
                         {
@@ -225,7 +225,7 @@ async def _download_range(
                 raise error from None
             status = None
             retry_after = None
-            error = RetryableDownloadError(type(caught).__name__)
+            error = RetryableDownloadError(f"{type(caught).__name__}: {detail}")
         delay = _backoff_delay(attempt, initial_backoff, max_backoff, retry_after)
         if on_error:
             await on_error(

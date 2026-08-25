@@ -147,6 +147,9 @@ async def test_transient_failure_automatically_retries_and_records_error(tmp_pat
     await value.close()
     assert result.state == "completed" and result.run_count == 2
     assert errors[0].retryable and errors[0].file_id is None
+    assert errors[0].message == (
+        "Temporary download failure (TransientModelDownloadError): temporary"
+    )
 
 
 @pytest.mark.asyncio
@@ -180,6 +183,9 @@ async def test_no_progress_timeout_stops_retrying(tmp_path: Path, monkeypatch) -
     await value.close()
     assert result.state == "failed"
     assert result.error_code == "no_progress_timeout"
+    assert result.error_message == (
+        "Download made no progress before the configured timeout: temporary"
+    )
     assert (await value.errors(job.id))[0].retryable is False
 
 
@@ -231,16 +237,23 @@ async def test_explicit_active_cancel_is_terminal(tmp_path: Path) -> None:
 async def test_worker_sanitizes_permanent_failure(tmp_path: Path) -> None:
     client = MagicMock()
     client.snapshot_model = AsyncMock(return_value=snapshot())
-    client._pull_job = AsyncMock(side_effect=ModelDownloadError("secret-url?token=x"))
+    client._pull_job = AsyncMock(
+        side_effect=ModelDownloadError(
+            "License Server denied https://storage.example/model?token=secret-value"
+        )
+    )
     value = manager(tmp_path, client=client, max_concurrent_downloads=1)
     job = await value.enqueue("example")
     await value.start()
     result = await asyncio.wait_for(value.wait(job.id, poll_interval=0.01), 2)
     await value.close()
     assert result.state == "failed"
-    assert "token=x" not in (result.error_message or "")
+    assert result.error_message == (
+        "Download failed (ModelDownloadError): License Server denied [URL REDACTED]"
+    )
     errors = await value.errors(job.id)
     assert errors and errors[0].retryable is False
+    assert errors[0].message == result.error_message
 
 
 @pytest.mark.asyncio
@@ -268,6 +281,7 @@ async def test_checksum_failure_stops_after_integrity_budget(tmp_path: Path) -> 
     await value.close()
     assert result.state == "failed"
     assert result.error_code == "integrity_retries_exhausted"
+    assert result.error_message == ("Download failed repeated integrity verification: bad")
     assert result.run_count == 2
 
 

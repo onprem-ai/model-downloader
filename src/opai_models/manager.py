@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import re
 import secrets
 import sqlite3
 import threading
@@ -28,6 +27,7 @@ from opai_models.download import (
     DownloadCancelled,
     RetryableDownloadError,
 )
+from opai_models.errors import sanitize_error_detail
 from opai_models.metadata import SourceDocument
 from opai_models.snapshot import ModelSnapshot
 
@@ -139,11 +139,7 @@ def _timestamp(value: datetime | None = None) -> str:
 
 
 def _safe_error(value: object, maximum: int = 500) -> str:
-    message = str(value or "download failure")
-    message = re.sub(r"https?://\S+", "[URL REDACTED]", message, flags=re.IGNORECASE)
-    message = re.sub(r"Bearer\s+\S+", "Bearer [REDACTED]", message, flags=re.IGNORECASE)
-    message = re.sub(r"ONPRM(?:-[0-9A-Z]{5}){5}", "[LICENSE REDACTED]", message)
-    return message[:maximum]
+    return sanitize_error_detail(value, maximum)
 
 
 class SQLiteQueueStore:
@@ -1181,13 +1177,16 @@ class DownloadManager:
                         self.initial_backoff * (2 ** min(current.consecutive_failures, 16)),
                     )
                     delay = secrets.randbelow(max(1, int(cap * 1000) + 1)) / 1000
+                    # Preserve the dependency's operator-safe exception detail.
+                    # The store applies URL, bearer-token, and license redaction.
+                    message = f"Temporary download failure ({type(exc).__name__}): {exc}"
                     await asyncio.to_thread(
                         self.store.record_job_error,
                         job.id,
                         token,
                         {
                             "error_type": type(exc).__name__,
-                            "message": f"Temporary download failure ({type(exc).__name__})",
+                            "message": message,
                             "retryable": True,
                             "backoff_seconds": delay,
                         },
@@ -1198,7 +1197,7 @@ class DownloadManager:
                         token,
                         delay=delay,
                         error_code=type(exc).__name__,
-                        error_message=f"Temporary download failure ({type(exc).__name__})",
+                        error_message=message,
                     )
                     self._wake.set()
                 else:
@@ -1210,11 +1209,11 @@ class DownloadManager:
                         else type(exc).__name__
                     )
                     message = (
-                        "Download made no progress before the configured timeout"
+                        f"Download made no progress before the configured timeout: {exc}"
                         if stalled
-                        else "Download failed repeated integrity verification"
+                        else f"Download failed repeated integrity verification: {exc}"
                         if integrity_exhausted
-                        else f"Download failed ({type(exc).__name__})"
+                        else f"Download failed ({type(exc).__name__}): {exc}"
                     )
                     await asyncio.to_thread(
                         self.store.record_job_error,

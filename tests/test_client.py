@@ -195,21 +195,35 @@ async def test_access_rejects_wrong_path_negative_size_and_bad_maps() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failures_are_classified_and_sanitized() -> None:
+async def test_failures_are_classified_with_sanitized_details() -> None:
     for status, error_type in ((503, TransientModelDownloadError), (403, ModelDownloadError)):
-        instance = client(lambda request, status=status: httpx.Response(status))
+        instance = client(
+            lambda request, status=status: httpx.Response(
+                status,
+                json={
+                    "detail": (
+                        "model is not licensed; inspect "
+                        "https://license.example/account?token=secret-value"
+                    )
+                },
+            )
+        )
         with pytest.raises(error_type, match=f"HTTP {status}") as caught:
             await instance.access("example", "a")
-        assert "license-secret" not in str(caught.value)
+        message = str(caught.value)
+        assert "model is not licensed" in message
+        assert "license-secret" not in message
+        assert "secret-value" not in message
+        assert "[URL REDACTED]" in message
         await instance.http.aclose()
 
     def offline(request):
-        raise httpx.ConnectError("secret URL", request=request)
+        raise httpx.ConnectError("DNS lookup failed for license.internal", request=request)
 
     instance = client(offline)
     with pytest.raises(TransientModelDownloadError, match="ConnectError") as caught:
         await instance.access("example", "a")
-    assert "secret URL" not in str(caught.value)
+    assert "DNS lookup failed for license.internal" in str(caught.value)
     await instance.http.aclose()
 
 

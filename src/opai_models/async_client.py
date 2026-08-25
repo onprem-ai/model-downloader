@@ -50,45 +50,45 @@ def _completed_directory_matches(
     trusted_identity: SigstoreIdentity | None,
     sigstore_offline: bool,
 ) -> bool:
-    try:
-        if read_source(destination / ".source.json") != source:
-            return False
-        expected_paths = {item.relative_path for item in files}
-        sums_path = destination / "SHA256SUMS"
-        if verify_checksums or verify_signatures or sums_path.is_file():
-            sums = sums_path.read_bytes()
-            if "sha256:" + hashlib.sha256(sums).hexdigest() != job.snapshot_sha256:
-                return False
-            parsed = parse_sha256sums(sums)
-            if parsed != {item.relative_path: item.expected_sha256 for item in files}:
-                return False
-            expected_paths.add("SHA256SUMS")
-        else:
-            sums = b""
-        signature_path = destination / "SHA256SUMS.sigstore.json"
-        if verify_signatures:
-            if trusted_identity is None or not signature_path.is_file():
-                return False
-            verify_sigstore_bundle(
-                sums,
-                signature_path.read_bytes(),
-                trusted_identity,
-                offline=sigstore_offline,
-            )
-            expected_paths.add("SHA256SUMS.sigstore.json")
-        actual_paths = {
-            path.relative_to(destination).as_posix()
-            for path in destination.rglob("*")
-            if path.is_file()
-        }
-        return actual_paths == expected_paths and (
-            not verify_checksums
-            or all(
-                _matches(destination / item.relative_path, item.expected_sha256) for item in files
-            )
-        )
-    except (OSError, ModelDownloadError):
+    source_path = destination / ".source.json"
+    if not source_path.exists():
         return False
+    # Corrupt metadata and filesystem access failures are not ordinary cache
+    # misses. Propagate them so callers can report the actionable reason.
+    if read_source(source_path) != source:
+        return False
+    expected_paths = {item.relative_path for item in files}
+    sums_path = destination / "SHA256SUMS"
+    if verify_checksums or verify_signatures or sums_path.is_file():
+        sums = sums_path.read_bytes()
+        if "sha256:" + hashlib.sha256(sums).hexdigest() != job.snapshot_sha256:
+            return False
+        parsed = parse_sha256sums(sums)
+        if parsed != {item.relative_path: item.expected_sha256 for item in files}:
+            return False
+        expected_paths.add("SHA256SUMS")
+    else:
+        sums = b""
+    signature_path = destination / "SHA256SUMS.sigstore.json"
+    if verify_signatures:
+        if trusted_identity is None or not signature_path.is_file():
+            return False
+        verify_sigstore_bundle(
+            sums,
+            signature_path.read_bytes(),
+            trusted_identity,
+            offline=sigstore_offline,
+        )
+        expected_paths.add("SHA256SUMS.sigstore.json")
+    actual_paths = {
+        path.relative_to(destination).as_posix()
+        for path in destination.rglob("*")
+        if path.is_file()
+    }
+    return actual_paths == expected_paths and (
+        not verify_checksums
+        or all(_matches(destination / item.relative_path, item.expected_sha256) for item in files)
+    )
 
 
 def _secure_parent(root: Path, relative_path: str) -> Path:

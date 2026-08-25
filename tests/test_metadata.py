@@ -120,9 +120,20 @@ def test_source_rejects_duplicate_json_keys_and_nonfinite_values() -> None:
             parse_source(data)
 
 
-def test_source_invalid_json_is_sanitized(tmp_path: Path) -> None:
+def test_source_invalid_json_does_not_echo_untrusted_contents(tmp_path: Path) -> None:
     path = tmp_path / ".source.json"
     path.write_text('{"secret":"value"}')
     with pytest.raises(ModelDownloadError, match="invalid .source.json") as caught:
         read_source(path)
     assert "value" not in str(caught.value)
+
+
+def test_source_read_error_preserves_filesystem_detail(tmp_path: Path) -> None:
+    path = tmp_path / "missing" / ".source.json"
+
+    with pytest.raises(ModelDownloadError) as caught:
+        read_source(path)
+
+    message = str(caught.value)
+    assert "cannot read .source.json" in message
+    assert "No such file or directory" in message

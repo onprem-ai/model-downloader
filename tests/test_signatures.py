@@ -33,10 +33,13 @@ def test_verify_bundle_uses_exact_bytes_and_identity_policy() -> None:
     verifier.verify_artifact.assert_called_once_with(b"exact-checksum-bytes\n", bundle, "policy")
 
 
-def test_verify_bundle_exposes_only_safe_error() -> None:
+def test_verify_bundle_preserves_verifier_error_detail() -> None:
     with (
-        patch("sigstore.models.Bundle.from_json", side_effect=ValueError("secret details")),
+        patch(
+            "sigstore.models.Bundle.from_json",
+            side_effect=ValueError("bundle is missing verification material"),
+        ),
         pytest.raises(ModelDownloadError, match="model signature verification failed") as caught,
     ):
         verify_sigstore_bundle(b"checksums", b"invalid", SigstoreIdentity("identity", "issuer"))
-    assert "secret details" not in str(caught.value)
+    assert "bundle is missing verification material" in str(caught.value)

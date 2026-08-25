@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from opai_models.client import ModelDownloadError
+from opai_models.errors import sanitize_error_detail
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -211,8 +212,9 @@ def parse_source(data: bytes, *, require_revision: bool = False) -> SourceDocume
 def read_source(path: Path, *, require_revision: bool = False) -> SourceDocument:
     try:
         data = path.read_bytes()
-    except OSError:
-        raise ModelDownloadError("invalid .source.json") from None
+    except OSError as exc:
+        detail = sanitize_error_detail(exc)
+        raise ModelDownloadError(f"cannot read .source.json: {detail}") from None
     return parse_source(data, require_revision=require_revision)
 
 

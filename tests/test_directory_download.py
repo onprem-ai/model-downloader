@@ -7,6 +7,7 @@ import pytest
 from conftest import license_key
 
 from opai_models.async_client import AsyncModelClient, _completed_directory_matches
+from opai_models.client import ModelDownloadError
 from opai_models.manager import SQLiteQueueStore
 from opai_models.metadata import SourceDocument
 from opai_models.signatures import SigstoreIdentity
@@ -45,6 +46,24 @@ def provenance() -> SourceDocument:
             },
         }
     )
+
+
+def test_completed_directory_surfaces_invalid_provenance(tmp_path: Path) -> None:
+    destination = tmp_path / "model"
+    destination.mkdir()
+    (destination / ".source.json").write_text("not JSON")
+
+    with pytest.raises(ModelDownloadError, match="invalid .source.json"):
+        _completed_directory_matches(
+            destination,
+            MagicMock(snapshot_sha256="sha256:" + "0" * 64),
+            [],
+            provenance(),
+            verify_checksums=False,
+            verify_signatures=False,
+            trusted_identity=None,
+            sigstore_offline=False,
+        )
 
 
 def test_completed_directory_signature_and_checksum_controls(tmp_path: Path) -> None:

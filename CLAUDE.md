@@ -1,5 +1,29 @@
 # Repository Instructions
 
+## Non-negotiable error transparency
+
+Errors must never be swallowed, replaced with generic text, or reduced to an
+exception class name. Operators must receive the complete actionable reason for
+a failure through exceptions, durable job state, error history, CLI output, and
+public API consumers.
+
+- When translating an exception, preserve its message and relevant context. For
+  example, use `f"Download failed ({type(exc).__name__}): {exc}"`, not only
+  `f"Download failed ({type(exc).__name__})"`.
+- When an HTTP service returns an error, preserve the status and its bounded
+  response detail. Do not report only `HTTP 404` when the response explains why.
+- Never use `except ...: pass`, return a success value after a failure, or catch
+  an exception merely to discard it.
+- A catch used for cleanup, rollback, retry classification, or conversion to a
+  domain exception is allowed only when the original detail is preserved or the
+  exception is immediately re-raised.
+- Expected predicate probes may return `False` only when failure is genuinely
+  equivalent to a negative result and no operator action depends on the reason.
+- Error text must be sanitized before persistence or display. Redact credentials,
+  bearer tokens, license keys, and signed URLs, but retain all non-secret detail.
+- Add regression tests that assert actionable detail survives every error
+  boundary and that secrets remain redacted.
+
 ## Non-negotiable API design
 
 This is a deliberately async Python library. Avoid ambiguity: there is one public
