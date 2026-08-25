@@ -1,7 +1,7 @@
 import hashlib
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -21,21 +21,22 @@ def access(content: bytes, *, source: str = "source", checksum: str | None = Non
     )
 
 
-def test_external_state_download_records_only_durable_chunks(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_external_state_download_records_only_durable_chunks(tmp_path: Path) -> None:
     content = b"abcdef"
     client = MagicMock(spec=LicenseClient)
-    client.access.return_value = access(content)
+    client.access = AsyncMock(return_value=access(content))
     completed = {0}
     events = []
     partial = tmp_path / "file"
     partial.write_bytes(b"abc" + b"\0" * 3)
 
-    def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
+    async def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
         os.pwrite(descriptor, content[start : end + 1], start)
         return end - start + 1
 
     with patch("opai_models.download._download_range", side_effect=ranged) as transfer:
-        result = pull_file_with_state(
+        result = await pull_file_with_state(
             client,
             "example",
             "file",
@@ -63,13 +64,14 @@ def test_external_state_download_records_only_durable_chunks(tmp_path: Path) -> 
         ({"checksums": {"sha256": "b" * 64}}, "checksum changed"),
     ],
 )
-def test_external_state_rejects_changed_source(tmp_path: Path, change, message: str) -> None:
+@pytest.mark.asyncio
+async def test_external_state_rejects_changed_source(tmp_path: Path, change, message: str) -> None:
     content = b"abcdef"
     current = access(content)
     client = MagicMock(spec=LicenseClient)
-    client.access.return_value = ModelAccess(**{**current.__dict__, **change})
+    client.access = AsyncMock(return_value=ModelAccess(**{**current.__dict__, **change}))
     with pytest.raises(ModelDownloadError, match=message):
-        pull_file_with_state(
+        await pull_file_with_state(
             client,
             "example",
             current.path,
@@ -83,10 +85,11 @@ def test_external_state_rejects_changed_source(tmp_path: Path, change, message: 
         )
 
 
-def test_external_state_rejects_invalid_chunks_and_final_hash(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_external_state_rejects_invalid_chunks_and_final_hash(tmp_path: Path) -> None:
     content = b"abcdef"
     client = MagicMock(spec=LicenseClient)
-    client.access.return_value = access(content)
+    client.access = AsyncMock(return_value=access(content))
     arguments = dict(
         expected_source_id="source",
         expected_size=6,
@@ -95,11 +98,11 @@ def test_external_state_rejects_invalid_chunks_and_final_hash(tmp_path: Path) ->
         chunk_size=3,
     )
     with pytest.raises(ModelDownloadError, match="chunk state"):
-        pull_file_with_state(
+        await pull_file_with_state(
             client, "example", "file", tmp_path / "file", completed_chunks={2}, **arguments
         )
 
-    def corrupt(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
+    async def corrupt(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
         os.pwrite(descriptor, b"x" * (end - start + 1), start)
         return end - start + 1
 
@@ -107,25 +110,24 @@ def test_external_state_rejects_invalid_chunks_and_final_hash(tmp_path: Path) ->
         patch("opai_models.download._download_range", side_effect=corrupt),
         pytest.raises(ModelDownloadError, match="SHA-256"),
     ):
-        pull_file_with_state(
+        await pull_file_with_state(
             client, "example", "file", tmp_path / "file", completed_chunks=set(), **arguments
         )
 
 
-def test_external_state_accepts_missing_provider_checksum(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_external_state_accepts_missing_provider_checksum(tmp_path: Path) -> None:
     content = b"abcdef"
     client = MagicMock(spec=LicenseClient)
-    client.access.return_value = access(content)
-    client.access.return_value = ModelAccess(
-        **{**client.access.return_value.__dict__, "checksums": {}}
-    )
+    current = access(content)
+    client.access = AsyncMock(return_value=ModelAccess(**{**current.__dict__, "checksums": {}}))
 
-    def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
+    async def ranged(provider, descriptor, start, end, retries, timeout, should_cancel, **kwargs):
         os.pwrite(descriptor, content[start : end + 1], start)
         return end - start + 1
 
     with patch("opai_models.download._download_range", side_effect=ranged):
-        result = pull_file_with_state(
+        result = await pull_file_with_state(
             client,
             "example",
             "file",
@@ -140,12 +142,13 @@ def test_external_state_accepts_missing_provider_checksum(tmp_path: Path) -> Non
     assert result.read_bytes() == content
 
 
-def test_external_state_propagates_cancellation(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_external_state_propagates_cancellation(tmp_path: Path) -> None:
     content = b"abcdef"
     client = MagicMock(spec=LicenseClient)
-    client.access.return_value = access(content)
+    client.access = AsyncMock(return_value=access(content))
     with pytest.raises(DownloadCancelled):
-        pull_file_with_state(
+        await pull_file_with_state(
             client,
             "example",
             "file",

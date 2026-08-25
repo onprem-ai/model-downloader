@@ -69,8 +69,10 @@ def test_cli_pull_forwards_verification_policy(monkeypatch, tmp_path: Path) -> N
     manager.close = AsyncMock()
     manager.enqueue = AsyncMock(return_value=job("queued"))
     manager.wait = AsyncMock(return_value=job())
+    client = MagicMock()
+    client.aclose = AsyncMock()
     with (
-        patch("opai_models.cli.AsyncModelClient") as client_type,
+        patch("opai_models.cli.AsyncModelClient", return_value=client) as client_type,
         patch("opai_models.cli.DownloadManager", return_value=manager) as manager_type,
     ):
         assert (
@@ -126,8 +128,10 @@ def test_cli_pull_can_explicitly_skip_signature_verification(monkeypatch, tmp_pa
     manager.close = AsyncMock()
     manager.enqueue = AsyncMock(return_value=job("queued"))
     manager.wait = AsyncMock(return_value=job())
+    client = MagicMock()
+    client.aclose = AsyncMock()
     with (
-        patch("opai_models.cli.AsyncModelClient") as client_type,
+        patch("opai_models.cli.AsyncModelClient", return_value=client) as client_type,
         patch("opai_models.cli.DownloadManager", return_value=manager),
     ):
         assert (
@@ -163,6 +167,7 @@ def test_cli_sync_forwards_policy(monkeypatch, tmp_path: Path, capsys) -> None:
     )
     client = MagicMock()
     client.sync_model = AsyncMock(return_value=result)
+    client.aclose = AsyncMock()
     with patch("opai_models.cli.AsyncModelClient", return_value=client) as client_type:
         assert (
             main(

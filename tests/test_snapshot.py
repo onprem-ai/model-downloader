@@ -68,7 +68,8 @@ def listing() -> list[dict[str, object]]:
     ]
 
 
-def test_snapshot_checksum_normalization_and_empty_inventory() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_checksum_normalization_and_empty_inventory() -> None:
     digest = "a" * 64
     assert _sha256(digest.upper()) == digest
     assert _sha256(__import__("base64").b64encode(bytes.fromhex(digest)).decode()) == digest
@@ -79,7 +80,8 @@ def test_snapshot_checksum_normalization_and_empty_inventory() -> None:
         ModelSnapshot.create("example", [])
 
 
-def test_snapshot_recurses_and_uses_authoritative_metadata() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_recurses_and_uses_authoritative_metadata() -> None:
     client = MagicMock(spec=LicenseClient)
     pages = listing()
     client.list_all.side_effect = pages
@@ -99,7 +101,7 @@ def test_snapshot_recurses_and_uses_authoritative_metadata() -> None:
         "z.bin": 2,
     }
     client.access.side_effect = lambda model, path: access(path, sizes[path])
-    result = snapshot_model(client, "example", verify_signatures=False)
+    result = await snapshot_model(client, "example", verify_signatures=False)
     assert [item.relative_path for item in result.files] == [
         ".source.json",
         "a.json",
@@ -112,7 +114,8 @@ def test_snapshot_recurses_and_uses_authoritative_metadata() -> None:
     assert result.source.source.repository == "owner/model"
 
 
-def test_snapshot_requires_trusted_identity_when_signature_exists() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_requires_trusted_identity_when_signature_exists() -> None:
     client = MagicMock(spec=LicenseClient)
     pages = listing()
     pages[0]["objects"].append({"key": "SHA256SUMS.sigstore.json", "size": 8})
@@ -128,10 +131,11 @@ def test_snapshot_requires_trusted_identity_when_signature_exists() -> None:
     )
     client.read_small.side_effect = [sums, source]
     with pytest.raises(ModelDownloadError, match="trusted identity"):
-        snapshot_model(client, "example")
+        await snapshot_model(client, "example")
 
 
-def test_snapshot_enforces_signature_by_default_and_passes_exact_manifest() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_enforces_signature_by_default_and_passes_exact_manifest() -> None:
     client = MagicMock(spec=LicenseClient)
     pages = listing()
     pages[0]["objects"].append({"key": "SHA256SUMS.sigstore.json", "size": 8})
@@ -159,16 +163,17 @@ def test_snapshot_enforces_signature_by_default_and_passes_exact_manifest() -> N
     with __import__("unittest.mock").mock.patch(
         "opai_models.snapshot.verify_sigstore_bundle"
     ) as verify:
-        snapshot_model(client, "example", trusted_identity=identity)
+        await snapshot_model(client, "example", trusted_identity=identity)
     verify.assert_called_once_with(sums, b"bundle", identity, offline=False)
 
     client.list_all.side_effect = listing()
     client.read_small.side_effect = [sums, source]
     with pytest.raises(ModelDownloadError, match="signature is required"):
-        snapshot_model(client, "example", trusted_identity=identity)
+        await snapshot_model(client, "example", trusted_identity=identity)
 
 
-def test_checksum_verification_can_be_skipped_independently() -> None:
+@pytest.mark.asyncio
+async def test_checksum_verification_can_be_skipped_independently() -> None:
     client = MagicMock(spec=LicenseClient)
     client.list_all.return_value = {
         "objects": [
@@ -182,7 +187,7 @@ def test_checksum_verification_can_be_skipped_independently() -> None:
     client.access.side_effect = lambda model, path: access(
         path, len(source_bytes()) if path.endswith(".source.json") else 1, "f" * 64
     )
-    result = snapshot_model(
+    result = await snapshot_model(
         client,
         "example",
         verify_checksums=False,
@@ -193,7 +198,8 @@ def test_checksum_verification_can_be_skipped_independently() -> None:
     assert result.sha256sums is None
 
 
-def test_snapshot_without_verification_uses_authenticated_listing() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_without_verification_uses_authenticated_listing() -> None:
     client = MagicMock(spec=LicenseClient)
     source = source_bytes()
     client.list_all.return_value = {
@@ -207,7 +213,7 @@ def test_snapshot_without_verification_uses_authenticated_listing() -> None:
     client.access.side_effect = lambda model, path: access(
         path, len(source) if path == ".source.json" else 4
     )
-    result = snapshot_model(
+    result = await snapshot_model(
         client,
         "example",
         verify_checksums=False,
@@ -219,11 +225,12 @@ def test_snapshot_without_verification_uses_authenticated_listing() -> None:
     client.read_small.assert_called_once_with("example", ".source.json")
 
 
-def test_snapshot_requires_metadata_and_exact_inventory() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_requires_metadata_and_exact_inventory() -> None:
     client = MagicMock(spec=LicenseClient)
     client.list_all.return_value = {"objects": [], "prefixes": []}
     with pytest.raises(ModelDownloadError, match="SHA256SUMS"):
-        snapshot_model(client, "example", verify_signatures=False)
+        await snapshot_model(client, "example", verify_signatures=False)
 
     client.list_all.return_value = listing()[0] | {"prefixes": []}
     client.read_small.side_effect = [
@@ -231,10 +238,11 @@ def test_snapshot_requires_metadata_and_exact_inventory() -> None:
         source_bytes(),
     ]
     with pytest.raises(ModelDownloadError, match="inventory"):
-        snapshot_model(client, "example", verify_signatures=False)
+        await snapshot_model(client, "example", verify_signatures=False)
 
 
-def test_snapshot_rejects_changed_listing_and_provider_checksum() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_rejects_changed_listing_and_provider_checksum() -> None:
     client = MagicMock(spec=LicenseClient)
     client.list_all.return_value = {
         "objects": [
@@ -257,7 +265,7 @@ def test_snapshot_rejects_changed_listing_and_provider_checksum() -> None:
         path, len(source_bytes()) if path.endswith(".source.json") else 3
     )
     with pytest.raises(ModelDownloadError, match="size changed"):
-        snapshot_model(client, "example", verify_signatures=False)
+        await snapshot_model(client, "example", verify_signatures=False)
     client.read_small.side_effect = [
         render_sha256sums(
             {
@@ -273,7 +281,7 @@ def test_snapshot_rejects_changed_listing_and_provider_checksum() -> None:
         hashlib.sha256(source_bytes()).hexdigest() if path.endswith(".source.json") else "b" * 64,
     )
     with pytest.raises(ModelDownloadError, match="checksum changed"):
-        snapshot_model(client, "example", verify_signatures=False)
+        await snapshot_model(client, "example", verify_signatures=False)
 
     client.read_small.side_effect = [
         render_sha256sums(
@@ -287,14 +295,15 @@ def test_snapshot_rejects_changed_listing_and_provider_checksum() -> None:
     client.access.side_effect = lambda model, path: access(
         path, len(source_bytes()) if path.endswith(".source.json") else 4
     )
-    result = snapshot_model(client, "example", verify_signatures=False)
+    result = await snapshot_model(client, "example", verify_signatures=False)
     assert next(item for item in result.files if item.relative_path == "file").sha256 == "a" * 64
 
 
-def test_snapshot_rejects_root_and_duplicate_objects() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_rejects_root_and_duplicate_objects() -> None:
     client = MagicMock(spec=LicenseClient)
     with pytest.raises(ModelDownloadError, match="model ID"):
-        snapshot_model(client, "bad/id")
+        await snapshot_model(client, "bad/id")
     client.list_all.return_value = {
         "objects": [
             {"key": "file", "size": 1},
@@ -303,14 +312,15 @@ def test_snapshot_rejects_root_and_duplicate_objects() -> None:
         "prefixes": [],
     }
     with pytest.raises(ModelDownloadError, match="duplicate"):
-        snapshot_model(client, "example", verify_signatures=False)
+        await snapshot_model(client, "example", verify_signatures=False)
 
 
-def test_snapshot_rejects_outside_child_prefix_and_object() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_rejects_outside_child_prefix_and_object() -> None:
     client = MagicMock(spec=LicenseClient)
     client.list_all.return_value = {"objects": [], "prefixes": ["../other/"]}
     with pytest.raises(ModelDownloadError, match="model-relative path"):
-        snapshot_model(client, "example", verify_signatures=False)
+        await snapshot_model(client, "example", verify_signatures=False)
     client.list_all.return_value = {
         "objects": [
             {"key": "../other/file", "size": 1},
@@ -320,10 +330,11 @@ def test_snapshot_rejects_outside_child_prefix_and_object() -> None:
         "prefixes": [],
     }
     with pytest.raises(ModelDownloadError, match="model-relative path"):
-        snapshot_model(client, "example", verify_signatures=False)
+        await snapshot_model(client, "example", verify_signatures=False)
 
 
-def test_snapshot_records_resume_identity_without_urls() -> None:
+@pytest.mark.asyncio
+async def test_snapshot_records_resume_identity_without_urls() -> None:
     item = ModelFile("f", "f", 1, "source", "a" * 64, "etag", "version")
     source = SourceDocument.from_dict(
         {

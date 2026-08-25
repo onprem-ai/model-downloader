@@ -118,7 +118,7 @@ async def test_pull_model_stages_verifies_and_atomically_publishes(tmp_path: Pat
 
     client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
 
-    def pull_file(client, model_id, path, destination, **kwargs):
+    async def pull_file(client, model_id, path, destination, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents[path])
         kwargs["mark_complete"](0, destination.stat().st_size, 123)
@@ -164,7 +164,7 @@ async def test_pull_model_without_verification_uses_inventory_without_manifest(
         verify_signatures=False,
     )
 
-    def pull_file(client, model_id, path, destination, **kwargs):
+    async def pull_file(client, model_id, path, destination, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents[path])
         kwargs["mark_complete"](0, destination.stat().st_size, 123)
@@ -191,7 +191,7 @@ async def test_pull_model_rejects_checksum_and_preserves_staging(tmp_path: Path)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
     client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
 
-    def corrupt(client, model_id, path, destination, **kwargs):
+    async def corrupt(client, model_id, path, destination, **kwargs):
         relative = path
         destination.write_bytes(b"wrong" if relative == "file" else contents[relative])
         return destination
@@ -273,7 +273,7 @@ async def test_pull_model_rejects_nested_staging_symlink(tmp_path: Path) -> None
     (staging / "nested").symlink_to(outside, target_is_directory=True)
     client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
 
-    def pull_source(client, model_id, path, destination, **kwargs):
+    async def pull_source(client, model_id, path, destination, **kwargs):
         destination.write_bytes(contents[path])
         return destination
 
@@ -298,7 +298,7 @@ async def test_pull_model_rejects_lost_lease_before_publish(tmp_path: Path) -> N
     claimed = store.claim("worker", 60)
     assert claimed and store.save_snapshot(job.id, claimed[1], snap)
 
-    def pull_file(client, model_id, path, destination, **kwargs):
+    async def pull_file(client, model_id, path, destination, **kwargs):
         data = contents[path]
         destination.write_bytes(data)
         kwargs["mark_complete"](0, len(data), 1)

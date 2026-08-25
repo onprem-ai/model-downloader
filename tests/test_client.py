@@ -1,33 +1,27 @@
-import io
-import json
-import urllib.error
-from unittest.mock import patch
-
+import httpx
 import pytest
 
 from opai_models.client import LicenseClient, ModelDownloadError, TransientModelDownloadError
 
 
-class Response(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-
-def response(value: object) -> Response:
-    return Response(json.dumps(value).encode())
+def client(handler, key=lambda: "secret") -> LicenseClient:
+    return LicenseClient(
+        "https://license.example",
+        key,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
 
 
-def test_restricts_model_ids_and_relative_paths() -> None:
-    client = LicenseClient("https://license.example", "secret")
+@pytest.mark.asyncio
+async def test_restricts_model_ids_and_relative_paths() -> None:
+    instance = client(lambda request: httpx.Response(500))
     for model_id in ("", "namespace/example", "a/b", "..", "bad\n"):
         with pytest.raises(ModelDownloadError, match="model ID"):
-            client.access(model_id, "file")
+            await instance.access(model_id, "file")
     for path in ("../secret", "a//file", "a\\file", "file\x01", "folder/"):
         with pytest.raises(ModelDownloadError, match="model"):
-            client.access("example", path)
+            await instance.access("example", path)
+    await instance.http.aclose()
 
 
 def test_relative_directory_prefix_validation() -> None:
@@ -38,7 +32,8 @@ def test_relative_directory_prefix_validation() -> None:
             LicenseClient._relative_path(value, prefix=True)
 
 
-def test_access_parses_relative_metadata_without_logging_url() -> None:
+@pytest.mark.asyncio
+async def test_access_parses_relative_metadata_without_logging_url() -> None:
     body = {
         "path": "a.bin",
         "url": "https://s3.example/a?signature=secret",
@@ -48,113 +43,127 @@ def test_access_parses_relative_metadata_without_logging_url() -> None:
         "checksums": {"sha256": "b" * 64},
         "required_headers": {"If-Match": "etag"},
     }
-    client = LicenseClient("https://license.example/", "license-secret")
-    with patch("urllib.request.urlopen", return_value=response(body)) as urlopen:
-        result = client.access("example", "a.bin")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=body)
+
+    instance = client(handler, lambda: "license-secret")
+    result = await instance.access("example", "a.bin")
     assert result.path == "a.bin"
     assert result.size == 12
-    request = urlopen.call_args.args[0]
-    assert request.full_url == "https://license.example/v1/models/example/access/a.bin"
-    assert request.headers["Authorization"] == "Bearer license-secret"
+    assert str(requests[0].url) == "https://license.example/v1/models/example/access/a.bin"
+    assert requests[0].headers["Authorization"] == "Bearer license-secret"
+    await instance.http.aclose()
 
 
-def test_list_models_follows_cursor_and_validates_ids() -> None:
-    client = LicenseClient("https://license.example", "secret")
-    pages = [
-        {"models": ["b", "a"], "next_cursor": "cursor"},
-        {"models": ["a", "c"], "next_cursor": None},
-    ]
-    with patch.object(client, "_json", side_effect=pages) as request:
-        result = client.list_models(limit=2)
+@pytest.mark.asyncio
+async def test_list_models_follows_cursor_and_validates_ids() -> None:
+    pages = iter(
+        [
+            {"models": ["b", "a"], "next_cursor": "cursor"},
+            {"models": ["a", "c"], "next_cursor": None},
+        ]
+    )
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=next(pages))
+
+    instance = client(handler)
+    result = await instance.list_models(limit=2)
     assert result == {"models": ["a", "b", "c"], "next_cursor": None}
-    assert "cursor=cursor" in request.call_args_list[1].args[0]
+    assert requests[1].url.params["cursor"] == "cursor"
+    await instance.http.aclose()
 
 
-def test_list_models_rejects_bad_results_and_repeated_cursor() -> None:
-    client = LicenseClient("https://license.example", "secret")
-    with patch.object(client, "_json", return_value={"models": {}, "next_cursor": None}):
-        with pytest.raises(ModelDownloadError, match="invalid model listing"):
-            client.list_models()
-    with patch.object(
-        client,
-        "_json",
-        return_value={"models": [], "next_cursor": "same"},
+@pytest.mark.asyncio
+async def test_list_models_rejects_bad_results_and_repeated_cursor() -> None:
+    for body, message in (
+        ({"models": {}, "next_cursor": None}, "invalid model listing"),
+        ({"models": [], "next_cursor": "same"}, "repeated"),
+        ({"models": ["namespace/model"], "next_cursor": None}, "model ID"),
     ):
-        with pytest.raises(ModelDownloadError, match="repeated"):
-            client.list_models()
-    with patch.object(
-        client,
-        "_json",
-        return_value={"models": ["namespace/model"], "next_cursor": None},
-    ):
-        with pytest.raises(ModelDownloadError, match="model ID"):
-            client.list_models()
+        instance = client(lambda request, body=body: httpx.Response(200, json=body))
+        with pytest.raises(ModelDownloadError, match=message):
+            await instance.list_models()
+        await instance.http.aclose()
 
 
-def test_list_page_uses_model_id_and_relative_prefix() -> None:
-    client = LicenseClient("https://license.example", "secret")
-    with patch.object(client, "_json", return_value={}) as request:
-        client.list_page("example model", "nested files/", limit=5, cursor="a+b=")
-    url = request.call_args.args[0]
-    assert url.startswith("/v1/models/example%20model/files?")
-    assert "prefix=nested+files%2F" in url
-    assert "cursor=a%2Bb%3D" in url
+@pytest.mark.asyncio
+async def test_list_page_uses_model_id_and_relative_prefix() -> None:
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    instance = client(handler)
+    await instance.list_page("example model", "nested files/", limit=5, cursor="a+b=")
+    request = requests[0]
+    assert request.url.path == "/v1/models/example model/files"
+    assert request.url.params["prefix"] == "nested files/"
+    assert request.url.params["cursor"] == "a+b="
+    await instance.http.aclose()
 
 
-def test_list_all_follows_cursor_and_deduplicates_prefixes() -> None:
-    client = LicenseClient("https://license.example", "secret")
+@pytest.mark.asyncio
+async def test_list_all_follows_cursor_and_deduplicates_prefixes(monkeypatch) -> None:
+    instance = client(lambda request: httpx.Response(500))
     pages = [
-        {
-            "objects": [{"key": "a", "size": 1}],
-            "prefixes": ["sub/"],
-            "next_cursor": "cursor",
-        },
-        {
-            "objects": [{"key": "b", "size": 2}],
-            "prefixes": ["sub/"],
-            "next_cursor": None,
-        },
+        {"objects": [{"key": "a", "size": 1}], "prefixes": ["sub/"], "next_cursor": "x"},
+        {"objects": [{"key": "b", "size": 2}], "prefixes": ["sub/"], "next_cursor": None},
     ]
-    with patch.object(client, "list_page", side_effect=pages) as list_page:
-        result = client.list_all("example")
+    from unittest.mock import AsyncMock
+
+    mocked = AsyncMock(side_effect=pages)
+    monkeypatch.setattr(instance, "list_page", mocked)
+    result = await instance.list_all("example")
     assert [item["key"] for item in result["objects"]] == ["a", "b"]
     assert result["prefixes"] == ["sub/"]
     assert result["model_id"] == "example"
-    assert list_page.call_count == 2
+    assert mocked.await_count == 2
+    await instance.http.aclose()
 
 
-def test_list_normalizes_null_collections() -> None:
-    client = LicenseClient("https://license.example", "secret")
-    with patch.object(
-        client,
+@pytest.mark.asyncio
+async def test_list_normalizes_null_collections_and_rejects_bad_pages(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    instance = client(lambda request: httpx.Response(500))
+    monkeypatch.setattr(
+        instance,
         "list_page",
-        return_value={"objects": None, "prefixes": None, "next_cursor": None},
-    ):
-        assert client.list_all("example") == {
-            "model_id": "example",
-            "prefix": "",
-            "objects": [],
-            "prefixes": [],
-            "next_cursor": None,
-        }
-
-
-def test_list_rejects_repeated_cursor_and_malformed_collections() -> None:
-    client = LicenseClient("https://license.example", "secret")
-    with patch.object(
-        client,
+        AsyncMock(return_value={"objects": None, "prefixes": None, "next_cursor": None}),
+    )
+    assert await instance.list_all("example") == {
+        "model_id": "example",
+        "prefix": "",
+        "objects": [],
+        "prefixes": [],
+        "next_cursor": None,
+    }
+    monkeypatch.setattr(
+        instance,
         "list_page",
-        return_value={"objects": [], "prefixes": [], "next_cursor": "same"},
-    ):
-        with pytest.raises(ModelDownloadError, match="repeated"):
-            client.list_all("example")
-    with patch.object(client, "list_page", return_value={"objects": {}, "prefixes": []}):
-        with pytest.raises(ModelDownloadError, match="invalid listing"):
-            client.list_all("example")
+        AsyncMock(return_value={"objects": [], "prefixes": [], "next_cursor": "same"}),
+    )
+    with pytest.raises(ModelDownloadError, match="repeated"):
+        await instance.list_all("example")
+    monkeypatch.setattr(
+        instance,
+        "list_page",
+        AsyncMock(return_value={"objects": {}, "prefixes": []}),
+    )
+    with pytest.raises(ModelDownloadError, match="invalid listing"):
+        await instance.list_all("example")
+    await instance.http.aclose()
 
 
-def test_access_rejects_wrong_path_negative_size_and_bad_maps() -> None:
-    client = LicenseClient("https://license.example", "secret")
+@pytest.mark.asyncio
+async def test_access_rejects_wrong_path_negative_size_and_bad_maps() -> None:
     base = {
         "path": "a",
         "url": "https://s3.example/a",
@@ -171,32 +180,55 @@ def test_access_rejects_wrong_path_negative_size_and_bad_maps() -> None:
         {"checksums": {"sha256": 1}},
         {"required_headers": []},
     ):
-        with patch.object(client, "_json", return_value={**base, **change}):
-            with pytest.raises(ModelDownloadError, match="invalid model metadata"):
-                client.access("example", "a")
+        instance = client(lambda request, body={**base, **change}: httpx.Response(200, json=body))
+        with pytest.raises(ModelDownloadError, match="invalid model metadata"):
+            await instance.access("example", "a")
+        await instance.http.aclose()
 
 
-def test_transient_license_server_failures_are_classified() -> None:
-    client = LicenseClient("https://license.example", "license-secret")
-    for failure in (
-        urllib.error.HTTPError("https://license.example", 503, "busy", {}, None),
-        urllib.error.URLError("offline"),
+@pytest.mark.asyncio
+async def test_failures_are_classified_and_sanitized() -> None:
+    for status, error_type in ((503, TransientModelDownloadError), (403, ModelDownloadError)):
+        instance = client(lambda request, status=status: httpx.Response(status))
+        with pytest.raises(error_type, match=f"HTTP {status}") as caught:
+            await instance.access("example", "a")
+        assert "license-secret" not in str(caught.value)
+        await instance.http.aclose()
+
+    def offline(request):
+        raise httpx.ConnectError("secret URL", request=request)
+
+    instance = client(offline)
+    with pytest.raises(TransientModelDownloadError, match="ConnectError") as caught:
+        await instance.access("example", "a")
+    assert "secret URL" not in str(caught.value)
+    await instance.http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_and_response_shape() -> None:
+    for response, message in (
+        (httpx.Response(200, content=b"not-json"), "invalid JSON"),
+        (httpx.Response(200, json=[]), "invalid response"),
     ):
-        with patch("urllib.request.urlopen", side_effect=failure):
-            with pytest.raises(TransientModelDownloadError):
-                client.access("example", "a")
+        instance = client(lambda request, response=response: response)
+        with pytest.raises(ModelDownloadError, match=message):
+            await instance.access("example", "a")
+        await instance.http.aclose()
 
 
-def test_http_error_is_sanitized() -> None:
-    client = LicenseClient("https://license.example", "license-secret")
-    error = urllib.error.HTTPError(
-        "https://license.example/path",
-        403,
-        "forbidden",
-        {},
-        io.BytesIO(b'{"detail":"not allowed"}'),
-    )
-    with patch("urllib.request.urlopen", side_effect=error):
-        with pytest.raises(ModelDownloadError, match="HTTP 403") as caught:
-            client.access("example", "a")
-    assert "license-secret" not in str(caught.value)
+@pytest.mark.asyncio
+async def test_supports_async_license_provider() -> None:
+    async def key() -> str:
+        return "async-secret"
+
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"models": [], "next_cursor": None})
+
+    instance = client(handler, key)
+    await instance.list_models()
+    assert seen == ["Bearer async-secret"]
+    await instance.http.aclose()

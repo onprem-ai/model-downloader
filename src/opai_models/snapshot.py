@@ -85,7 +85,7 @@ def _sha256(value: str | None) -> str | None:
     return decoded.hex() if len(decoded) == 32 else None
 
 
-def snapshot_model(
+async def snapshot_model(
     client: LicenseClient,
     model_id: str,
     *,
@@ -103,7 +103,7 @@ def snapshot_model(
         if current in visited:
             continue
         visited.add(current)
-        listing = client.list_all(model, current)
+        listing = await client.list_all(model, current)
         listings.append(listing)
         for child in listing.get("prefixes") or []:
             child_prefix = str(child)
@@ -145,14 +145,14 @@ def snapshot_model(
     checksum_bytes: bytes | None = None
     checksums: dict[str, str | None]
     if verify_checksums or verify_signatures:
-        checksum_bytes = client.read_small(model, "SHA256SUMS")
+        checksum_bytes = await client.read_small(model, "SHA256SUMS")
         parsed_checksums = parse_sha256sums(checksum_bytes)
         if set(parsed_checksums) != set(listed):
             raise ModelDownloadError("SHA256SUMS inventory does not match model objects")
         checksums = dict(parsed_checksums)
     else:
         checksums = dict.fromkeys(listed)
-    source_bytes = client.read_small(model, ".source.json")
+    source_bytes = await client.read_small(model, ".source.json")
     source = parse_source(source_bytes)
     if verify_checksums and hashlib.sha256(source_bytes).hexdigest() != checksums[".source.json"]:
         raise ModelDownloadError(".source.json checksum verification failed")
@@ -161,7 +161,9 @@ def snapshot_model(
             raise ModelDownloadError("Sigstore trusted identity and issuer are required")
         if "SHA256SUMS.sigstore.json" not in metadata:
             raise ModelDownloadError("model signature is required")
-        bundle = client.read_small(model, "SHA256SUMS.sigstore.json", maximum=16 * 1024 * 1024)
+        bundle = await client.read_small(
+            model, "SHA256SUMS.sigstore.json", maximum=16 * 1024 * 1024
+        )
         if checksum_bytes is None:
             raise ModelDownloadError("model signature requires SHA256SUMS")
         verify_sigstore_bundle(
@@ -174,7 +176,7 @@ def snapshot_model(
     files: list[ModelFile] = []
     for relative, expected_sha256 in checksums.items():
         object_path = relative
-        access = client.access(model, object_path)
+        access = await client.access(model, object_path)
         if access.path != object_path:
             raise ModelDownloadError("model access path does not match listing")
         if access.size != listed[relative]:

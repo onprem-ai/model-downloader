@@ -165,9 +165,8 @@ async def sync_model(
                         }
                     )
 
-            await asyncio.to_thread(
-                pull_file_with_state,
-                client._client(),
+            await pull_file_with_state(
+                client._client,
                 snapshot.model_id,
                 item.object_path,
                 target,
@@ -201,8 +200,7 @@ async def sync_model(
 
         await asyncio.to_thread(_write_bytes, staging / "SHA256SUMS", remote_manifest)
         if client.verify_signatures:
-            signature = await asyncio.to_thread(
-                client._client().read_small,
+            signature = await client._client.read_small(
                 snapshot.model_id,
                 "SHA256SUMS.sigstore.json",
                 maximum=16 * 1024 * 1024,

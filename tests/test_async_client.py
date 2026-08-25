@@ -1,5 +1,6 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from opai_models.async_client import AsyncModelClient
@@ -20,18 +21,36 @@ def test_signature_verification_requires_complete_trust_policy() -> None:
 @pytest.mark.asyncio
 async def test_async_client_reuses_configuration_and_fetches_credentials_per_operation() -> None:
     credentials = MagicMock(return_value="license")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"models": ["a"], "next_cursor": None})
+        return httpx.Response(
+            200,
+            json={
+                "path": "file",
+                "url": "https://s3.example/a",
+                "size": 1,
+                "source_id": "source",
+                "expires_at": "later",
+                "checksums": {},
+                "required_headers": {},
+            },
+        )
+
     client = AsyncModelClient("https://license.example", credentials, verify_signatures=False)
-    listing = {"models": ["a"], "next_cursor": None}
-    access = ModelAccess("file", "https://s3/a", 1, "source", "later", {}, {})
-    with (
-        patch("opai_models.async_client.LicenseClient.list_models", return_value=listing),
-        patch("opai_models.async_client.LicenseClient.access", return_value=access),
-    ):
-        async with client as entered:
-            assert entered is client
-            assert await client.list_models() == listing
-            assert await client.get_model_file("a", "file") == access
+    await client._client.http.aclose()
+    client._client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client as entered:
+        assert entered is client
+        assert await client.list_models() == {"models": ["a"], "next_cursor": None}
+        assert await client.get_model_file("a", "file") == ModelAccess(
+            "file", "https://s3.example/a", 1, "source", "later", {}, {}
+        )
     assert credentials.call_count == 2
+    assert all(request.headers["Authorization"] == "Bearer license" for request in requests)
 
 
 @pytest.mark.asyncio
@@ -42,12 +61,14 @@ async def test_async_source_and_snapshot_delegate_without_persisting_credentials
         b'"repository":"a/b","revision":null}}'
     )
     with (
-        patch("opai_models.async_client.LicenseClient.read_small", return_value=source),
-        patch("opai_models.async_client.snapshot_model", return_value="snapshot") as snapshot,
+        patch("opai_models.async_client.LicenseClient.read_small", AsyncMock(return_value=source)),
+        patch(
+            "opai_models.async_client.snapshot_model", AsyncMock(return_value="snapshot")
+        ) as snapshot,
     ):
         assert (await client.get_source("a")).source.repository == "a/b"
         assert await client.snapshot_model("a") == "snapshot"
-    assert snapshot.call_count == 1
+    assert snapshot.await_count == 1
     assert snapshot.call_args.args[1] == "a"
     assert snapshot.call_args.kwargs == {
         "verify_checksums": True,
@@ -60,7 +81,10 @@ async def test_async_source_and_snapshot_delegate_without_persisting_credentials
 @pytest.mark.asyncio
 async def test_async_source_rejects_invalid_json() -> None:
     client = AsyncModelClient("https://license.example", lambda: "license", verify_signatures=False)
-    with patch("opai_models.async_client.LicenseClient.read_small", return_value=b"secret-invalid"):
+    with patch(
+        "opai_models.async_client.LicenseClient.read_small",
+        AsyncMock(return_value=b"secret-invalid"),
+    ):
         with pytest.raises(ModelDownloadError, match="invalid .source.json") as caught:
             await client.get_source("a")
     assert "secret-invalid" not in str(caught.value)

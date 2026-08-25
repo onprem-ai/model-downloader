@@ -102,10 +102,12 @@ Rules:
   not depend on FastAPI/Pydantic response types.
 - Blocking filesystem and SQLite work must not block the caller's event loop.
 - One long-lived client should be reusable across requests and downloads.
-- The license is supplied by a callback at operation time and kept only in
-  memory. It must never be stored in queue rows or metadata files.
-- Internal abstractions must permit a future native async HTTP transport without
-  changing the public API.
+- The license is supplied by a callback for each authenticated API request and
+  kept only in memory. The callback may return a string directly or an awaitable
+  string, enabling local environment lookups and async secret providers without
+  blocking the event loop. It must never be stored in queue rows or metadata files.
+- License Server and direct-download HTTP requests use a shared native-async
+  HTTPX client and connection pool; network I/O must not use worker threads.
 
 ## 5. CLI behavior
 

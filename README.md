@@ -131,6 +131,7 @@ from opai_models import AsyncModelClient, DownloadManager
 
 client = AsyncModelClient(
     "https://license.api.onprem.ai",
+    # May also be an async callable for Vault/secret-manager integrations.
     license_provider=lambda: os.environ["OPAI_LICENSE_KEY"],
     sigstore_identity=os.environ["OPAI_SIGSTORE_IDENTITY"],
     sigstore_issuer=os.environ["OPAI_SIGSTORE_ISSUER"],
@@ -141,10 +142,18 @@ manager = DownloadManager(
     client=client,
 )
 
-async with manager:
-    job = await manager.enqueue("example")
-    completed = await manager.wait(job.id)
+try:
+    async with manager:
+        job = await manager.enqueue("example")
+        completed = await manager.wait(job.id)
+finally:
+    await client.aclose()
 ```
+
+The client uses a reusable native-async HTTPX connection pool. The license
+provider is called for each authenticated API request and may return either a
+string or an awaitable string. Credentials remain in memory and are not stored
+in the downloader database or model directory.
 
 For a web service, create exactly one manager per application process in the
 FastAPI lifespan. See the complete commented example:

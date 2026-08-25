@@ -153,18 +153,21 @@ async def _sync(args: argparse.Namespace, license_provider) -> int:
         sigstore_issuer=args.sigstore_issuer,
         sigstore_offline=args.sigstore_offline,
     )
-    result = await client.sync_model(
-        args.model_id,
-        args.destination,
-        rehash=args.rehash,
-        delete=args.delete,
-        chunk_size=args.chunk_size,
-        workers=args.workers,
-        request_retries=args.request_retries,
-        initial_backoff=args.initial_backoff,
-        max_backoff=args.max_backoff,
-        progress=_progress if not args.json else None,
-    )
+    try:
+        result = await client.sync_model(
+            args.model_id,
+            args.destination,
+            rehash=args.rehash,
+            delete=args.delete,
+            chunk_size=args.chunk_size,
+            workers=args.workers,
+            request_retries=args.request_retries,
+            initial_backoff=args.initial_backoff,
+            max_backoff=args.max_backoff,
+            progress=_progress if not args.json else None,
+        )
+    finally:
+        await client.aclose()
     output = {
         "event": "complete",
         "model_id": result.model_id,
@@ -238,6 +241,7 @@ async def _pull(args: argparse.Namespace, license_provider) -> int:
         result = await manager.wait(queued.id, on_update=show)
     finally:
         await manager.close()
+        await client.aclose()
     if result.state != "completed":
         raise ModelDownloadError(result.error_message or f"download {result.state}")
     event = {"event": "complete", "job": result.to_dict()}
@@ -264,25 +268,27 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_pull(args, lambda: key))
         if args.command == "sync":
             return asyncio.run(_sync(args, lambda: key))
-        client = LicenseClient(args.api_url, key)
-        if args.command == "list":
-            result = client.list_models(limit=args.limit)
-            if args.json:
-                print(json.dumps(result, indent=2))
-            else:
-                for model_id in result["models"]:
-                    print(model_id)
+
+        async def query() -> dict[str, Any]:
+            async with LicenseClient(args.api_url, lambda: key) as client:
+                if args.command == "list":
+                    return await client.list_models(limit=args.limit)
+                access = await client.access(args.model_id, args.relative_path)
+                return {
+                    "path": access.path,
+                    "size": access.size,
+                    "human_size": _human_size(access.size),
+                    "source_id": access.source_id,
+                    "expires_at": access.expires_at,
+                    "checksums": access.checksums,
+                    "range_supported": True,
+                }
+
+        result = asyncio.run(query())
+        if args.command == "list" and not args.json:
+            for model_id in result["models"]:
+                print(model_id)
         else:
-            access = client.access(args.model_id, args.relative_path)
-            result = {
-                "path": access.path,
-                "size": access.size,
-                "human_size": _human_size(access.size),
-                "source_id": access.source_id,
-                "expires_at": access.expires_at,
-                "checksums": access.checksums,
-                "range_supported": True,
-            }
             print(json.dumps(result, indent=2))
     except (ModelDownloadError, OSError, ValueError, json.JSONDecodeError) as exc:
         if args.json:

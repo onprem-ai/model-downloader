@@ -226,8 +226,8 @@ async def test_sync_progress_and_signature_verification(tmp_path: Path) -> None:
     )
     client.snapshot_model = AsyncMock(return_value=snap)
     raw = MagicMock()
-    raw.read_small.return_value = b"new-bundle"
-    client._client = MagicMock(return_value=raw)
+    raw.read_small = AsyncMock(return_value=b"new-bundle")
+    client._client = raw
     events = []
     with patch("opai_models.sync.verify_sigstore_bundle") as verify:
         result = await sync_model(client, "example", destination, progress=events.append)

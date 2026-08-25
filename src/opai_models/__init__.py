@@ -1,7 +1,7 @@
 """OnPrem AI model downloader public API."""
 
 from opai_models.async_client import AsyncModelClient
-from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
+from opai_models.client import LicenseClient, LicenseKeyProvider, ModelAccess, ModelDownloadError
 from opai_models.download import DownloadCancelled
 from opai_models.manager import (
     DownloadError,
@@ -27,6 +27,7 @@ __all__ = [
     "JobConflictError",
     "JobNotFoundError",
     "LicenseClient",
+    "LicenseKeyProvider",
     "ModelAccess",
     "ModelDownloadError",
     "ModelFile",

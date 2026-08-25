@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from opai_models.client import LicenseClient, ModelAccess, ModelDownloadError
+from opai_models.client import LicenseClient, LicenseKeyProvider, ModelAccess, ModelDownloadError
 from opai_models.download import (
     CancelCallback,
     ChecksumMismatchError,
@@ -20,8 +20,6 @@ from opai_models.snapshot import ModelSnapshot, snapshot_model
 
 if TYPE_CHECKING:
     from opai_models.sync import SyncResult
-
-LicenseProvider = Callable[[], str]
 
 
 def _file_sha256(path: Path) -> str:
@@ -110,15 +108,16 @@ def _write_bytes(path: Path, data: bytes) -> None:
 class AsyncModelClient:
     """Reusable async facade over the dependency-free transfer implementation.
 
-    Blocking filesystem and urllib operations run in worker threads, so callers
-    never block an asyncio/FastAPI event loop. Credentials are requested for
-    each operation and are never retained in durable state.
+    HTTP requests use one reusable native-async HTTPX connection pool. Blocking
+    filesystem, SQLite, hashing, and signature work is offloaded from the event
+    loop. Credentials are requested for each API request and never persisted.
+    The provider may return a string directly or return an awaitable string.
     """
 
     def __init__(
         self,
         api_url: str,
-        license_provider: LicenseProvider,
+        license_provider: LicenseKeyProvider,
         *,
         timeout: float = 30,
         verify_checksums: bool = True,
@@ -135,6 +134,7 @@ class AsyncModelClient:
         self.api_url = api_url
         self.license_provider = license_provider
         self.timeout = timeout
+        self._client = LicenseClient(api_url, license_provider, timeout)
         self.verify_checksums = verify_checksums
         self.verify_signatures = verify_signatures
         self.sigstore_identity = (
@@ -144,19 +144,15 @@ class AsyncModelClient:
         )
         self.sigstore_offline = sigstore_offline
 
-    def _client(self) -> LicenseClient:
-        return LicenseClient(self.api_url, self.license_provider(), self.timeout)
-
     async def list_models(self, *, limit: int = 1000) -> dict[str, Any]:
-        return await asyncio.to_thread(self._client().list_models, limit=limit)
+        return await self._client.list_models(limit=limit)
 
     async def get_model_file(self, model_id: str, relative_path: str) -> ModelAccess:
-        return await asyncio.to_thread(self._client().access, model_id, relative_path)
+        return await self._client.access(model_id, relative_path)
 
     async def snapshot_model(self, model_id: str) -> ModelSnapshot:
-        return await asyncio.to_thread(
-            snapshot_model,
-            self._client(),
+        return await snapshot_model(
+            self._client,
             model_id,
             verify_checksums=self.verify_checksums,
             verify_signatures=self.verify_signatures,
@@ -167,7 +163,7 @@ class AsyncModelClient:
     async def get_source(self, model_id: str) -> SourceDocument:
         """Fetch and validate provenance without retaining access material."""
         model = LicenseClient._model_id(model_id)
-        data = await asyncio.to_thread(self._client().read_small, model, ".source.json")
+        data = await self._client.read_small(model, ".source.json")
         return parse_source(data)
 
     async def sync_model(
@@ -300,9 +296,8 @@ class AsyncModelClient:
 
             try:
                 async with semaphore:
-                    await asyncio.to_thread(
-                        pull_file_with_state,
-                        self._client(),
+                    await pull_file_with_state(
+                        self._client,
                         job.model_id,
                         item.object_path,
                         target,
@@ -389,8 +384,7 @@ class AsyncModelClient:
         if self.verify_signatures:
             if sums is None:
                 raise ModelDownloadError("signature verification requires SHA256SUMS")
-            signature = await asyncio.to_thread(
-                self._client().read_small,
+            signature = await self._client.read_small(
                 job.model_id,
                 "SHA256SUMS.sigstore.json",
                 maximum=16 * 1024 * 1024,
@@ -417,5 +411,8 @@ class AsyncModelClient:
     async def __aenter__(self) -> "AsyncModelClient":
         return self
 
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
     async def __aexit__(self, *args: object) -> None:
-        return None
+        await self.aclose()

@@ -56,6 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[AppState]:
         yield {"downloads": manager}
     finally:
         await manager.close()
+        await client.aclose()
 
 
 app = FastAPI(lifespan=lifespan)
