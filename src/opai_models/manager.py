@@ -1150,7 +1150,20 @@ class DownloadManager:
             else:
                 now = _now()
                 last_progress = datetime.fromisoformat(current.last_progress_at)
-                stalled = (now - last_progress).total_seconds() >= self.no_progress_timeout
+                # No-progress timeout is meaningful only for retryable transfer
+                # failures. Permanent metadata errors must retain their real type.
+                is_retryable_failure = isinstance(
+                    exc,
+                    (
+                        RetryableDownloadError,
+                        TransientModelDownloadError,
+                        ChecksumMismatchError,
+                    ),
+                )
+                stalled = (
+                    is_retryable_failure
+                    and (now - last_progress).total_seconds() >= self.no_progress_timeout
+                )
                 integrity_exhausted = False
                 if isinstance(exc, ChecksumMismatchError):
                     failed_files = [
@@ -1159,18 +1172,7 @@ class DownloadManager:
                         if item.integrity_failures > self.integrity_retries
                     ]
                     integrity_exhausted = bool(failed_files)
-                retryable = (
-                    isinstance(
-                        exc,
-                        (
-                            RetryableDownloadError,
-                            TransientModelDownloadError,
-                            ChecksumMismatchError,
-                        ),
-                    )
-                    and not stalled
-                    and not integrity_exhausted
-                )
+                retryable = is_retryable_failure and not stalled and not integrity_exhausted
                 if retryable:
                     cap = min(
                         self.max_backoff,

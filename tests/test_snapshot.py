@@ -81,6 +81,24 @@ async def test_snapshot_checksum_normalization_and_empty_inventory() -> None:
 
 
 @pytest.mark.asyncio
+async def test_snapshot_rejects_empty_remote_model_before_manifest_validation() -> None:
+    client = MagicMock(spec=_AsyncLicenseTransport)
+    client.list_all.return_value = {
+        "prefix": "",
+        "objects": [],
+        "prefixes": [],
+    }
+
+    with pytest.raises(
+        ModelDownloadError,
+        match="remote model directory does not exist or is empty: example",
+    ):
+        await snapshot_model(client, "example", verify_signatures=False)
+
+    client.read_small.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_recurses_and_uses_authoritative_metadata() -> None:
     client = MagicMock(spec=_AsyncLicenseTransport)
     pages = listing()
@@ -228,7 +246,10 @@ async def test_snapshot_without_verification_uses_authenticated_listing() -> Non
 @pytest.mark.asyncio
 async def test_snapshot_requires_metadata_and_exact_inventory() -> None:
     client = MagicMock(spec=_AsyncLicenseTransport)
-    client.list_all.return_value = {"objects": [], "prefixes": []}
+    client.list_all.return_value = {
+        "objects": [{"key": ".source.json", "size": len(source_bytes())}],
+        "prefixes": [],
+    }
     with pytest.raises(ModelDownloadError, match="SHA256SUMS"):
         await snapshot_model(client, "example", verify_signatures=False)
 

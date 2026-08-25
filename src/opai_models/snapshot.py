@@ -138,6 +138,8 @@ async def snapshot_model(
                     raise ModelDownloadError("model listing contains a duplicate object")
                 listed[relative] = listed_size
 
+    if not listed and not metadata:
+        raise ModelDownloadError(f"remote model directory does not exist or is empty: {model}")
     if (verify_checksums or verify_signatures) and "SHA256SUMS" not in metadata:
         raise ModelDownloadError("model requires SHA256SUMS")
     if ".source.json" not in listed:

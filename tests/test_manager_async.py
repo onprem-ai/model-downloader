@@ -153,6 +153,34 @@ async def test_transient_failure_automatically_retries_and_records_error(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_old_permanent_snapshot_failure_is_not_mislabeled_as_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import opai_models.manager as module
+
+    client = MagicMock()
+    client.snapshot_model = AsyncMock(side_effect=ModelDownloadError("remote model is empty"))
+    client._pull_job = AsyncMock()
+    value = manager(
+        tmp_path,
+        client=client,
+        max_concurrent_downloads=1,
+        no_progress_timeout=1,
+    )
+    job = await value.enqueue("example")
+    future = module.datetime(2030, 1, 1, tzinfo=module.UTC)
+    monkeypatch.setattr(module, "_now", lambda: future)
+
+    await value.start()
+    result = await asyncio.wait_for(value.wait(job.id, poll_interval=0.01), 2)
+    await value.close()
+
+    assert result.state == "failed"
+    assert result.error_code == "ModelDownloadError"
+    assert result.error_message == "Download failed (ModelDownloadError): remote model is empty"
+
+
+@pytest.mark.asyncio
 async def test_no_progress_timeout_stops_retrying(tmp_path: Path, monkeypatch) -> None:
     import opai_models.manager as module
 
