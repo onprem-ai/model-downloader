@@ -94,6 +94,7 @@ await manager.list(...)
 await manager.errors(job_id)
 await manager.cancel(job_id)
 await manager.retry(job_id)
+await manager.dismiss(job_id)
 await manager.wait(job_id)
 ```
 
@@ -283,6 +284,7 @@ Rules:
 - Retry only downloads failed or incomplete files and never redownloads files
   whose local size and computed checksum still match the snapshot.
 - A failed job can be explicitly retried; transient failures retry automatically while progress remains within the configured timeout.
+- Terminal jobs can be dismissed from durable history. Active jobs must be cancelled before dismissal.
 - Re-enqueuing the same model directory name and destination attaches to the
   active job, enabling a restarted CLI to resume it. A different model directory
   targeting the same final destination or staging tree is rejected.

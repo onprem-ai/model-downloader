@@ -149,6 +149,8 @@ try:
     async with manager:
         job = await manager.enqueue("example")
         completed = await manager.wait(job.id)
+        # Terminal queue history can be removed explicitly when no longer needed.
+        await manager.dismiss(completed.id)
 finally:
     await client.aclose()
 ```

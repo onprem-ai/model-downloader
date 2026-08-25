@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from opai_models.manager import JobConflictError, SQLiteQueueStore
+from opai_models.manager import JobConflictError, JobNotFoundError, SQLiteQueueStore
 from opai_models.metadata import SourceDocument
 from opai_models.snapshot import ModelFile, ModelSnapshot
 
@@ -174,6 +174,41 @@ def test_destination_conflict_cancel_and_manual_retry(tmp_path: Path) -> None:
         error_message="safe",
     )
     assert store.retry(replacement.id).state == "queued"
+
+
+def test_dismiss_deletes_terminal_job_and_cascades_history(tmp_path: Path) -> None:
+    store = SQLiteQueueStore(tmp_path / "queue.sqlite")
+    job = store.enqueue("a", str(tmp_path / "a"))
+    claimed = store.claim("worker", 60)
+    assert claimed
+    assert store.record_job_error(
+        job.id,
+        claimed[1],
+        {"error_type": "Failure", "message": "visible detail", "retryable": False},
+    )
+    assert store.finish(job.id, claimed[1], "failed", error_message="visible detail")
+
+    store.dismiss(job.id)
+
+    with pytest.raises(JobNotFoundError):
+        store.get(job.id)
+    with closing(sqlite3.connect(store.database_path)) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM download_errors WHERE job_id=?", (job.id,)
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_dismiss_rejects_active_job(tmp_path: Path) -> None:
+    store = SQLiteQueueStore(tmp_path / "queue.sqlite")
+    job = store.enqueue("a", str(tmp_path / "a"))
+
+    with pytest.raises(JobConflictError, match="terminal"):
+        store.dismiss(job.id)
+
+    assert store.get(job.id).state == "queued"
 
 
 def test_job_error_is_sanitized_and_fenced(tmp_path: Path) -> None:

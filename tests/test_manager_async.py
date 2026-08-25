@@ -49,6 +49,9 @@ async def test_manager_public_api_and_context_lifecycle(tmp_path: Path) -> None:
     assert (await value.cancel(job.id)).state == "cancelled"
     with pytest.raises(Exception, match="not retryable"):
         await value.retry(job.id)
+    await value.dismiss(job.id)
+    with pytest.raises(KeyError):
+        await value.get(job.id)
     async with value:
         await value.start()  # idempotent
     assert not value._tasks

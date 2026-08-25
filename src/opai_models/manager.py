@@ -889,6 +889,26 @@ class SQLiteQueueStore:
             raise JobConflictError("job is not retryable")
         return self.get(job_id)
 
+    def dismiss(self, job_id: str) -> None:
+        """Delete a terminal job and its cascading file and error history."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state FROM download_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            if row["state"] not in _TERMINAL:
+                raise JobConflictError("only terminal download jobs can be dismissed")
+            connection.execute("DELETE FROM download_jobs WHERE id=?", (job_id,))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def cancellation_requested(self, job_id: str, token: str) -> bool:
         with closing(self._connect()) as connection, connection:
             row = connection.execute(
@@ -1028,6 +1048,10 @@ class DownloadManager:
         job = await asyncio.to_thread(self.store.retry, job_id)
         self._wake.set()
         return job
+
+    async def dismiss(self, job_id: str) -> None:
+        """Delete a terminal job from durable history."""
+        await asyncio.to_thread(self.store.dismiss, job_id)
 
     async def wait(
         self,
