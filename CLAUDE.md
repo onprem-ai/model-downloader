@@ -53,3 +53,17 @@ execution model, and it is asynchronous.
 When compatibility conflicts with this contract before the first stable release,
 prefer the clean async contract. Do not retain deprecated aliases or compatibility
 layers unless explicitly requested.
+
+## Version-control and release authorization
+
+- Never create or amend a commit without the user's explicit approval for that
+  specific commit.
+- Never push commits, branches, or tags without the user's explicit approval for
+  that specific push.
+- Never create a GitHub release, publish a package, or deploy anything without
+  the user's explicit approval for that specific action.
+- A request to implement, fix, refactor, test, or document something authorizes
+  working-tree changes only. It does not authorize committing or pushing them.
+- Before requesting approval, present a concise change summary, validation
+  results, and the proposed commit message. After approval, perform only the
+  approved version-control or release actions.
