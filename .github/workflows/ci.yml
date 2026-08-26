@@ -35,7 +35,7 @@ jobs:
           percentage=$(python -c 'import json; print(round(json.load(open("coverage.json"))["totals"]["percent_covered"]))')
           echo "percentage=$percentage" >> "$GITHUB_OUTPUT"
       - name: Update coverage badge
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.HAS_GIST_SECRET == 'true'
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && env.HAS_GIST_SECRET == 'true'
         uses: schneegans/dynamic-badges-action@0e50b8bad39e7e1afd3e4e9c2b7dd145fad07501 # v1.8.0
         with:
           auth: ${{ secrets.GIST_SECRET }}

@@ -5,6 +5,7 @@ on:
   workflow_run:
     workflows: [CI]
     types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,7 +13,7 @@ permissions:
 jobs:
   update-badge:
     # Publish only the canonical main-branch result, never a pull-request result.
-    if: github.event.workflow_run.head_branch == 'main'
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     env:
       HAS_GIST_SECRET: ${{ secrets.GIST_SECRET != '' }}
@@ -21,7 +22,7 @@ jobs:
       - name: Determine status
         id: status
         run: |
-          if [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
             echo "message=passing" >> "$GITHUB_OUTPUT"
             echo "color=green" >> "$GITHUB_OUTPUT"
           else
