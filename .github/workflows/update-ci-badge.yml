@@ -1,0 +1,41 @@
+# Update the public CI badge after the full CI workflow completes.
+name: Update CI Badge
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  update-badge:
+    # Publish only the canonical main-branch result, never a pull-request result.
+    if: github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    env:
+      HAS_GIST_SECRET: ${{ secrets.GIST_SECRET != '' }}
+
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
+            echo "message=passing" >> "$GITHUB_OUTPUT"
+            echo "color=green" >> "$GITHUB_OUTPUT"
+          else
+            echo "message=failing" >> "$GITHUB_OUTPUT"
+            echo "color=red" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update CI badge
+        if: env.HAS_GIST_SECRET == 'true'
+        uses: schneegans/dynamic-badges-action@0e50b8bad39e7e1afd3e4e9c2b7dd145fad07501 # v1.8.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: a86fb4ad5e2ecb21c0a53493264f8e4c
+          filename: model-downloader-tests-status.json
+          label: Tests
+          message: ${{ steps.status.outputs.message }}
+          color: ${{ steps.status.outputs.color }}

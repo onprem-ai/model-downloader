@@ -1,4 +1,7 @@
-# opai-models
+# Model Downloader
+
+![Tests](https://img.shields.io/endpoint?style=for-the-badge&url=https://gist.githubusercontent.com/tomas-polach/a86fb4ad5e2ecb21c0a53493264f8e4c/raw/model-downloader-tests-status.json)
+![Coverage](https://img.shields.io/endpoint?style=for-the-badge&url=https://gist.githubusercontent.com/tomas-polach/a86fb4ad5e2ecb21c0a53493264f8e4c/raw/model-downloader-coverage.json)
 
 `opai-models` is an asynchronous Python library and command-line client for
 securely downloading complete model-weight directories from OnPrem AI storage.
