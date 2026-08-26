@@ -16,6 +16,9 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY = re.compile(r"^[^/\s\x00-\x1f\x7f]+/[^/\s\x00-\x1f\x7f]+$")
 _METADATA_NAMES = frozenset({"SHA256SUMS", "SHA256SUMS.sigstore.json"})
+_SOURCE_RESERVED_NAMES = frozenset({".source.json", *_METADATA_NAMES})
+_MAX_SOURCE_FILES = 10_000
+_MAX_SOURCE_BYTES = 10_000_000_000_000
 
 
 def safe_relative_path(value: str) -> str:
@@ -64,22 +67,34 @@ class UpstreamMetadata:
 
 
 @dataclass(frozen=True)
+class SourceFile:
+    path: str
+    size: int
+    upstream_sha256: str | None = None
+
+
+@dataclass(frozen=True)
 class SourceDocument:
     schema_version: int
     source: Source
     acquisition: Acquisition | None = None
     upstream_metadata: UpstreamMetadata | None = None
+    files: tuple[SourceFile, ...] = ()
 
     @classmethod
     def from_dict(cls, value: Any, *, require_revision: bool = False) -> "SourceDocument":
         try:
-            _keys(
-                value,
-                {"schema_version", "source", "acquisition", "upstream_metadata"},
-                {"schema_version", "source"},
-            )
-            if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+            if not isinstance(value, dict) or type(value.get("schema_version")) is not int:
                 raise ValueError
+            schema_version = value["schema_version"]
+            allowed = {"schema_version", "source", "acquisition", "upstream_metadata"}
+            required = {"schema_version", "source"}
+            if schema_version == 2:
+                allowed.add("files")
+                required.add("files")
+            elif schema_version != 1:
+                raise ValueError
+            _keys(value, allowed, required)
             raw_source = value["source"]
             _keys(
                 raw_source,
@@ -103,14 +118,21 @@ class SourceDocument:
             source = Source("huggingface", raw_source["repository"], revision, subdirectory)
             acquisition = _parse_acquisition(value.get("acquisition"))
             metadata = _parse_metadata(value.get("upstream_metadata"))
-            return cls(1, source, acquisition, metadata)
+            try:
+                files = _parse_source_files(value.get("files")) if schema_version == 2 else ()
+            except ModelDownloadError:
+                raise ValueError from None
+            return cls(schema_version, source, acquisition, metadata, files)
         except ModelDownloadError:
             raise
         except (KeyError, TypeError, ValueError):
             raise ModelDownloadError("invalid .source.json") from None
 
     def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"schema_version": 1, "source": asdict(self.source)}
+        result: dict[str, Any] = {
+            "schema_version": self.schema_version,
+            "source": asdict(self.source),
+        }
         if self.acquisition is not None:
             acquisition: dict[str, Any] = {"acquired_at": self.acquisition.acquired_at}
             if self.acquisition.tool is not None:
@@ -128,7 +150,41 @@ class SourceDocument:
             result["upstream_metadata"] = {
                 k: v for k, v in metadata.items() if v not in (None, [], ())
             }
+        if self.schema_version == 2:
+            result["files"] = [
+                {key: value for key, value in asdict(item).items() if value is not None}
+                for item in self.files
+            ]
         return result
+
+
+def _parse_source_files(value: Any) -> tuple[SourceFile, ...]:
+    if not isinstance(value, list) or not value or len(value) > _MAX_SOURCE_FILES:
+        raise ValueError
+    files: list[SourceFile] = []
+    previous_path: str | None = None
+    total_size = 0
+    for item in value:
+        _keys(item, {"path", "size", "upstream_sha256"}, {"path", "size"})
+        path = safe_relative_path(item["path"])
+        if path in _SOURCE_RESERVED_NAMES:
+            raise ValueError
+        if previous_path is not None and path <= previous_path:
+            raise ValueError
+        size = item["size"]
+        if type(size) is not int or size <= 0:
+            raise ValueError
+        total_size += size
+        if total_size > _MAX_SOURCE_BYTES:
+            raise ValueError
+        upstream_sha256 = item.get("upstream_sha256")
+        if upstream_sha256 is not None and (
+            not isinstance(upstream_sha256, str) or not _SHA256.fullmatch(upstream_sha256)
+        ):
+            raise ValueError
+        files.append(SourceFile(path, size, upstream_sha256))
+        previous_path = path
+    return tuple(files)
 
 
 def _keys(value: Any, allowed: set[str], required: set[str]) -> None:

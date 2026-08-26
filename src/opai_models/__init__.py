@@ -11,7 +11,7 @@ from opai_models.manager import (
     JobConflictError,
     JobNotFoundError,
 )
-from opai_models.metadata import SourceDocument
+from opai_models.metadata import SourceDocument, SourceFile
 from opai_models.signatures import SigstoreIdentity
 from opai_models.snapshot import ModelFile, ModelSnapshot
 from opai_models.sync import SyncResult
@@ -33,5 +33,6 @@ __all__ = [
     "ModelSnapshot",
     "SigstoreIdentity",
     "SourceDocument",
+    "SourceFile",
     "SyncResult",
 ]

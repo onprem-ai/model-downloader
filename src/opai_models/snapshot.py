@@ -156,6 +156,11 @@ async def snapshot_model(
         checksums = dict.fromkeys(listed)
     source_bytes = await client.read_small(model, ".source.json")
     source = parse_source(source_bytes)
+    if source.schema_version == 2:
+        source_inventory = {item.path: item.size for item in source.files}
+        payload_inventory = {path: size for path, size in listed.items() if path != ".source.json"}
+        if source_inventory != payload_inventory:
+            raise ModelDownloadError(".source.json file inventory does not match model objects")
     if verify_checksums and hashlib.sha256(source_bytes).hexdigest() != checksums[".source.json"]:
         raise ModelDownloadError(".source.json checksum verification failed")
     if verify_signatures:

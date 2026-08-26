@@ -398,11 +398,15 @@ and excludes `SHA256SUMS` and `SHA256SUMS.sigstore.json`. Paths must be relative
 normalized, and unable to escape the model directory. By default, the downloader
 computes a local SHA-256 for every listed file even when S3 provides no checksum.
 
-`.source.json` contains only durable source provenance and does not repeat the
-file inventory. Its normative JSON Schema and semantics are documented in
-[`source_file.md`](source_file.md) and
-[`source-v1.schema.json`](../src/opai_models/schemas/source-v1.schema.json). It contains no URLs,
-credentials, checksums, download progress, or storage-specific resume identity.
+`.source.json` contains only durable source provenance. Version 2 includes a
+source-file inventory with optional, explicitly non-authoritative
+`upstream_sha256` values; `SHA256SUMS` remains the authoritative integrity
+record. Its normative schemas and semantics are documented in
+[`source_file.md`](source_file.md),
+[`source-v1.schema.json`](../src/opai_models/schemas/source-v1.schema.json), and
+[`source-v2.schema.json`](../src/opai_models/schemas/source-v2.schema.json). It
+contains no URLs, credentials, download progress, or storage-specific resume
+identity.
 
 The directory is BagIt-inspired and can be explicitly converted to or from a
 BagIt package, but it does not claim BagIt or OCI conformance.

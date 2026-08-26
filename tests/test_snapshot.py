@@ -1,4 +1,5 @@
 import hashlib
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -241,6 +242,40 @@ async def test_snapshot_without_verification_uses_authenticated_listing() -> Non
     assert all(item.sha256 is None for item in result.files)
     assert result.sha256sums is None
     client.read_small.assert_called_once_with("example", ".source.json")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_v2_source_inventory_mismatch() -> None:
+    client = MagicMock(spec=_AsyncLicenseTransport)
+    source = json.dumps(
+        {
+            "schema_version": 2,
+            "source": {
+                "provider": "huggingface",
+                "repository": "owner/model",
+                "revision": "a" * 40,
+            },
+            "files": [{"path": "other", "size": 4}],
+        }
+    ).encode()
+    checksums = render_sha256sums(
+        {
+            ".source.json": hashlib.sha256(source).hexdigest(),
+            "file": hashlib.sha256(b"data").hexdigest(),
+        }
+    )
+    client.list_all.return_value = {
+        "objects": [
+            {"key": ".source.json", "size": len(source)},
+            {"key": "SHA256SUMS", "size": len(checksums)},
+            {"key": "file", "size": 4},
+        ],
+        "prefixes": [],
+    }
+    client.read_small.side_effect = [checksums, source]
+
+    with pytest.raises(ModelDownloadError, match="source.json file inventory"):
+        await snapshot_model(client, "example", verify_signatures=False)
 
 
 @pytest.mark.asyncio

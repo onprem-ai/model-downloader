@@ -46,6 +46,52 @@ def test_source_round_trip_is_canonical_and_private(tmp_path: Path) -> None:
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_source_v2_preserves_upstream_file_checksums() -> None:
+    value = source().to_dict()
+    value["schema_version"] = 2
+    value["files"] = [
+        {
+            "path": "config.json",
+            "size": 123,
+        },
+        {
+            "path": "transformer/model.safetensors",
+            "size": 456,
+            "upstream_sha256": "a" * 64,
+        },
+    ]
+
+    document = SourceDocument.from_dict(value, require_revision=True)
+
+    assert document.schema_version == 2
+    assert document.to_dict()["files"] == value["files"]
+
+
+def test_source_v2_rejects_noncanonical_file_inventory() -> None:
+    value = source().to_dict()
+    value["schema_version"] = 2
+    invalid_inventories = (
+        [],
+        [{"path": "../model", "size": 1}],
+        [{"path": "model", "size": 0}],
+        [{"path": "model", "size": 1, "upstream_sha256": "bad"}],
+        [{"path": "b", "size": 1}, {"path": "a", "size": 1}],
+        [{"path": "a", "size": 1}, {"path": "a", "size": 1}],
+        [{"path": "large", "size": 10_000_000_000_001}],
+    )
+    for files in invalid_inventories:
+        value["files"] = files
+        with pytest.raises(ModelDownloadError, match="invalid .source.json"):
+            SourceDocument.from_dict(value)
+
+
+def test_source_v1_rejects_v2_file_inventory() -> None:
+    value = source().to_dict()
+    value["files"] = [{"path": "model", "size": 1}]
+    with pytest.raises(ModelDownloadError, match="invalid .source.json"):
+        SourceDocument.from_dict(value)
+
+
 def test_source_rejects_unknown_operational_and_invalid_fields() -> None:
     base = source().to_dict()
     for changed in (

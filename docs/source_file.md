@@ -18,11 +18,47 @@ model-directory/
 headers, progress, ranges, retries, errors, local paths, or S3 storage identity.
 Mutable transfer state belongs only in SQLite.
 
-The normative machine-readable definition is
-[`source-v1.schema.json`](../src/opai_models/schemas/source-v1.schema.json), using
-JSON Schema Draft 2020-12. The schema is bundled in the installed Python package.
+The normative machine-readable definitions are
+[`source-v1.schema.json`](../src/opai_models/schemas/source-v1.schema.json) and
+[`source-v2.schema.json`](../src/opai_models/schemas/source-v2.schema.json), using
+JSON Schema Draft 2020-12. Both schemas are bundled in the installed package.
 
-## Version 1 example
+## Version 2 example
+
+Version 2 adds a source file inventory. Its optional `upstream_sha256` values are
+provenance supplied by the importer; they are not authoritative integrity
+results.
+
+```json
+{
+  "schema_version": 2,
+  "source": {
+    "provider": "huggingface",
+    "repository": "Sehyo/Qwen3.5-122B-A10B-NVFP4",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "subdirectory": null
+  },
+  "files": [
+    {
+      "path": "config.json",
+      "size": 1234
+    },
+    {
+      "path": "weights/model.safetensors",
+      "size": 7516192768,
+      "upstream_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}
+```
+
+The file list is required, limited to 10,000 entries and 10 TB (decimal) total,
+and sorted lexicographically by normalized path. Paths are unique, sizes are
+exact positive byte counts, and `upstream_sha256`, when present, is exactly 64
+lowercase hexadecimal characters. Hugging Face LFS OIDs
+may be used when they represent the SHA-256 of the exact downloaded bytes.
+
+## Version 1 compatibility
 
 ```json
 {
@@ -52,7 +88,9 @@ JSON Schema Draft 2020-12. The schema is bundled in the installed Python package
 
 ## Field semantics
 
-- `schema_version` is required and is exactly `1`.
+- `schema_version` is required and is either `1` or `2`.
+- Version 1 remains readable for existing publications and has no `files` field.
+- Version 2 requires `files` with optional per-file `upstream_sha256` provenance.
 - `source.provider` is required and is exactly `huggingface` in version 1.
   Supporting another provider requires a new schema version or an explicitly
   defined additional source variant.
@@ -101,8 +139,9 @@ provenance metadata and is not itself the model content identity.
 `SHA256SUMS` lists `.source.json` and every payload file. It excludes itself and
 `SHA256SUMS.sigstore.json` to avoid recursion. The exact canonical bytes of
 `SHA256SUMS` identify the complete model snapshot and are the bytes authenticated
-by the Sigstore bundle. `.source.json` does not duplicate the file inventory or
-checksums.
+by the Sigstore bundle. Version 2 duplicates paths and sizes only to bind upstream provenance to exact
+source files. Its `upstream_sha256` values are never authoritative. `SHA256SUMS`
+remains the complete authoritative inventory computed from stored object bytes.
 
 ## Relationship to BagIt
 
